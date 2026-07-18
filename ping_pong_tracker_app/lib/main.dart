@@ -48,10 +48,14 @@ class _BLETestScreenState extends State<BLETestScreen> {
   List<String> _imuData = ["0.00", "0.00", "0.00", "0.00", "0.00", "0.00"];
   String _batteryPct = "--";
 
-  DateTime? _lastPacketTime;
-  double _totalDelayMs = 0;
-  int _packetCount = 0;
-  String _averageDelayStr = "0.0";
+  // Achieved sample rate, measured over a rolling 1-second window.
+  int _samplesInWindow = 0;
+  DateTime? _windowStart;
+  String _sampleRateStr = "0";
+
+  // LSM6DS3 sensitivities for the ranges configured in firmware.
+  static const double _accelScaleG = 0.488 / 1000.0; // +/-16 g  -> G per count
+  static const double _gyroScaleDps = 70.0 / 1000.0; // 2000 dps -> dps per count
 
   @override
   void dispose() {
@@ -105,14 +109,21 @@ class _BLETestScreenState extends State<BLETestScreen> {
     });
 
     try {
-      // Connect without any MTU negotiation: the firmware's binary packet
-      // is 15 bytes, which fits the default 23-byte MTU with room to spare.
       await device.connect(
         license: License.nonprofit,
         autoConnect: false,
         mtu: null,
       );
       _targetDevice = device;
+
+      // Request a large MTU so the firmware can pack many IMU samples into
+      // each notification (the key to streaming well above 100 Hz).
+      setState(() {
+        _connectionStatus = "Negotiating packet size...";
+      });
+      await Future.delayed(const Duration(milliseconds: 500));
+      await device.requestMtu(247);
+      await Future.delayed(const Duration(milliseconds: 500));
 
       setState(() {
         _connectionStatus = "Discovering Services...";
@@ -147,45 +158,49 @@ class _BLETestScreenState extends State<BLETestScreen> {
     });
 
     _charSubscription = char.onValueReceived.listen((value) {
+      // Batched binary packet from the firmware:
+      //   byte 0 : sample count N
+      //   byte 1 : battery %
+      //   then N * 12 bytes: int16 LE  ax, ay, az, gx, gy, gz  (raw counts)
+      if (value.length < 2) return;
+
+      int count = value[0];
+      int batt = value[1];
+      if (count < 1 || value.length < 2 + count * 12) return;
+
+      var byteData = ByteData.view(Uint8List.fromList(value).buffer);
+
+      // Measure the achieved sample rate over a rolling 1-second window.
       DateTime now = DateTime.now();
-      if (_lastPacketTime != null) {
-        int delay = now.difference(_lastPacketTime!).inMilliseconds;
-        _totalDelayMs += delay;
-        _packetCount++;
-        double avg = _totalDelayMs / _packetCount;
-        _averageDelayStr = avg.toStringAsFixed(1);
+      _windowStart ??= now;
+      _samplesInWindow += count;
+      int elapsedMs = now.difference(_windowStart!).inMilliseconds;
+      if (elapsedMs >= 1000) {
+        _sampleRateStr = (_samplesInWindow * 1000 / elapsedMs).round().toString();
+        _samplesInWindow = 0;
+        _windowStart = now;
       }
-      _lastPacketTime = now;
 
-      // The firmware sends a 15-byte packed binary struct, NOT text:
-      // int16 ax,ay,az (x1000), int16 gx,gy,gz (x10), uint16 dt_ms,
-      // uint8 batt — all little-endian. Decoding it as UTF-8 throws.
-      if (value.length >= 15) {
-        var byteData = ByteData.view(Uint8List.fromList(value).buffer);
+      // Display the most recent sample in the batch.
+      int base = 2 + (count - 1) * 12;
+      double ax = byteData.getInt16(base + 0, Endian.little) * _accelScaleG;
+      double ay = byteData.getInt16(base + 2, Endian.little) * _accelScaleG;
+      double az = byteData.getInt16(base + 4, Endian.little) * _accelScaleG;
+      double gx = byteData.getInt16(base + 6, Endian.little) * _gyroScaleDps;
+      double gy = byteData.getInt16(base + 8, Endian.little) * _gyroScaleDps;
+      double gz = byteData.getInt16(base + 10, Endian.little) * _gyroScaleDps;
 
-        double ax = byteData.getInt16(0, Endian.little) / 1000.0;
-        double ay = byteData.getInt16(2, Endian.little) / 1000.0;
-        double az = byteData.getInt16(4, Endian.little) / 1000.0;
-
-        double gx = byteData.getInt16(6, Endian.little) / 10.0;
-        double gy = byteData.getInt16(8, Endian.little) / 10.0;
-        double gz = byteData.getInt16(10, Endian.little) / 10.0;
-
-        // int dt = byteData.getUint16(12, Endian.little);
-        int batt = byteData.getUint8(14);
-
-        setState(() {
-          _imuData = [
-            ax.toStringAsFixed(3),
-            ay.toStringAsFixed(3),
-            az.toStringAsFixed(3),
-            gx.toStringAsFixed(1),
-            gy.toStringAsFixed(1),
-            gz.toStringAsFixed(1),
-          ];
-          _batteryPct = batt.toString();
-        });
-      }
+      setState(() {
+        _imuData = [
+          ax.toStringAsFixed(3),
+          ay.toStringAsFixed(3),
+          az.toStringAsFixed(3),
+          gx.toStringAsFixed(1),
+          gy.toStringAsFixed(1),
+          gz.toStringAsFixed(1),
+        ];
+        _batteryPct = batt.toString();
+      });
     });
   }
 
@@ -197,10 +212,9 @@ class _BLETestScreenState extends State<BLETestScreen> {
       _targetDevice = null;
       _isConnecting = false;
       _connectionStatus = "Disconnected";
-      _lastPacketTime = null;
-      _totalDelayMs = 0;
-      _packetCount = 0;
-      _averageDelayStr = "0.0";
+      _windowStart = null;
+      _samplesInWindow = 0;
+      _sampleRateStr = "0";
       _batteryPct = "--";
       _imuData = ["0.00", "0.00", "0.00", "0.00", "0.00", "0.00"];
     });
@@ -230,7 +244,7 @@ class _BLETestScreenState extends State<BLETestScreen> {
             ),
             const SizedBox(height: 10),
             Text(
-              "Running Avg Delay: $_averageDelayStr ms",
+              "Sample Rate: $_sampleRateStr Hz",
               style: const TextStyle(fontSize: 16, color: Colors.grey),
             ),
 

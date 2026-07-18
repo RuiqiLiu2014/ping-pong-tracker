@@ -1,140 +1,178 @@
 #include <Arduino.h>
-#include <ArduinoBLE.h>
+#include <bluefruit.h>   // Adafruit Bluefruit (SoftDevice S140) BLE stack
 #include "LSM6DS3.h"
 #include "Wire.h"
 
-// Battery pins for the Seeed XIAO nRF52840 Sense on the mbed core:
-// the divider enable P0.14 (active LOW) is Arduino pin 31 here, NOT 14.
-// Pin 14 on this core is PIN_LSM6DS3TR_C_POWER — the IMU's power rail —
-// so toggling it resets the IMU into power-down mode and every read
-// returns 0. (The value 14 is only correct on Seeed's Adafruit-based
-// core, which defines VBAT_ENABLE itself and skips this fallback.)
-#ifndef PIN_VBAT
-  #define PIN_VBAT 32
-#endif
-#ifndef VBAT_ENABLE
-  #define VBAT_ENABLE 31
-#endif
-
 // =====================================================
-// BLE NORDIC UART UUIDS
+// IMU  (LSM6DS3TR-C, internal I2C bus = Wire1 on the XIAO Sense)
+// The Seeed library remaps Wire->Wire1 when TARGET_SEEED_XIAO_NRF52840_SENSE
+// is defined; we set that macro in platformio.ini for the Adafruit core.
 // =====================================================
-BLEService uartService("6E400001-B5A3-F393-E0A9-E50E24DCCA9E");
-BLECharacteristic txCharacteristic("6E400003-B5A3-F393-E0A9-E50E24DCCA9E", BLENotify, 255);
-BLECharacteristic rxCharacteristic("6E400002-B5A3-F393-E0A9-E50E24DCCA9E", BLEWrite, 255);
-
 LSM6DS3 myIMU(I2C_MODE, 0x6A);
 
-unsigned long lastSampleTime = 0;
-unsigned long lastBatteryReadTime = 0;
-bool centralConnected = false;
-int currentBatteryPct = 100;
+#define LSM6DS3_STATUS_REG 0x1E   // bit0 XLDA (accel new), bit1 GDA (gyro new)
+#define LSM6DS3_OUTX_L_G   0x22   // gx,gy,gz,ax,ay,az are contiguous 0x22..0x2D
 
-// 15-byte binary payload
-struct __attribute__((packed)) SensorPacket {
-  int16_t ax, ay, az;
-  int16_t gx, gy, gz;
-  uint16_t dt;
-  uint8_t batt;
-};
+// =====================================================
+// BLE - Nordic UART UUIDs (little-endian 128-bit, same as the app expects)
+//   service 6E400001-..., TX (notify) 6E400003-...
+// =====================================================
+const uint8_t UART_SERVICE_UUID[16] = {
+  0x9E, 0xCA, 0xDC, 0x24, 0x0E, 0xE5, 0xA9, 0xE0,
+  0x93, 0xF3, 0xA3, 0xB5, 0x01, 0x00, 0x40, 0x6E};
+const uint8_t UART_TX_UUID[16] = {
+  0x9E, 0xCA, 0xDC, 0x24, 0x0E, 0xE5, 0xA9, 0xE0,
+  0x93, 0xF3, 0xA3, 0xB5, 0x03, 0x00, 0x40, 0x6E};
+
+BLEService        uartService(UART_SERVICE_UUID);
+BLECharacteristic txChar(UART_TX_UUID);
+
+// =====================================================
+// Batched notification buffer
+//   byte 0 : number of samples in this packet
+//   byte 1 : battery %
+//   then N * 12 bytes: int16 LE  ax, ay, az, gx, gy, gz  (raw sensor counts)
+// The app applies the LSM6DS3 sensitivities (accel +/-16g, gyro 2000 dps).
+// =====================================================
+#define MAX_SAMPLES   20              // 2 + 20*12 = 242 bytes, fits a 247-byte MTU
+#define SAMPLE_BYTES  12
+static uint8_t  txbuf[2 + MAX_SAMPLES * SAMPLE_BYTES];
+static uint16_t sampleCount = 0;
+static uint32_t lastFlushMs = 0;
+
+volatile bool connected = false;
+int      batteryPct  = 100;
+uint32_t lastBattUs  = 0;
+
+void connectCallback(uint16_t connHandle) {
+  BLEConnection* conn = Bluefruit.Connection(connHandle);
+  // Everything that maximizes throughput so a high sample rate can stream:
+  conn->requestPHY();                     // 2 Mbps PHY
+  conn->requestDataLengthUpdate();        // BLE data length extension
+  conn->requestMtuExchange(247);          // large MTU -> big batched packets
+  conn->requestConnectionParameter(6);    // 6 * 1.25 ms = 7.5 ms interval
+  connected = true;
+  Serial.println("Central connected");
+}
+
+void disconnectCallback(uint16_t connHandle, uint8_t reason) {
+  (void)connHandle;
+  (void)reason;
+  connected = false;
+  sampleCount = 0;
+  Serial.println("Central disconnected");
+}
 
 void setup() {
   Serial.begin(115200);
-  
-  // Wait up to 3 seconds for a USB connection, then run untethered!
-  unsigned long startWait = millis();
-  while (!Serial && (millis() - startWait < 3000));
+  uint32_t startWait = millis();
+  while (!Serial && (millis() - startWait < 2000)) {}
 
-  // The IMU sits on the internal Wire1 bus; the LSM6DS3 library powers
-  // the sensor and starts that bus itself inside begin().
+  // ---- IMU: configure for the maximum ODR both sensors share (1660 Hz) ----
+  myIMU.settings.gyroEnabled      = 1;
+  myIMU.settings.gyroRange        = 2000;   // deg/s
+  myIMU.settings.gyroSampleRate   = 1660;   // Hz (gyro max)
+  myIMU.settings.gyroFifoEnabled  = 0;
+  myIMU.settings.accelEnabled     = 1;
+  myIMU.settings.accelRange       = 16;     // g
+  myIMU.settings.accelSampleRate  = 1660;   // Hz
+  myIMU.settings.accelFifoEnabled = 0;
+  myIMU.settings.tempEnabled      = 0;
   if (myIMU.begin() != 0) {
-    while (1);
+    Serial.println("IMU init failed");
+    while (1) {}
   }
+  Wire1.setClock(400000);   // 400 kHz I2C so a 12-byte burst read is ~0.35 ms
 
-  // Battery setup
+  // ---- Battery divider (VBAT_ENABLE / PIN_VBAT provided by the variant) ----
   pinMode(PIN_VBAT, INPUT);
   pinMode(VBAT_ENABLE, OUTPUT);
   analogReadResolution(12);
-  digitalWrite(VBAT_ENABLE, HIGH); 
+  digitalWrite(VBAT_ENABLE, HIGH);   // divider off until we sample
 
-  if (!BLE.begin()) {
-    while (1);
-  }
+  // ---- BLE ----
+  Bluefruit.configPrphBandwidth(BANDWIDTH_MAX);   // must precede begin()
+  Bluefruit.begin();
+  Bluefruit.setTxPower(4);
+  Bluefruit.setName("PaddleTrack");
+  Bluefruit.Periph.setConnectCallback(connectCallback);
+  Bluefruit.Periph.setDisconnectCallback(disconnectCallback);
+  Bluefruit.Periph.setConnInterval(6, 12);        // 7.5 - 15 ms
 
-  BLE.setLocalName("PaddleTrack");
-  BLE.setAdvertisedService(uartService);
-  uartService.addCharacteristic(txCharacteristic);
-  uartService.addCharacteristic(rxCharacteristic);
-  BLE.addService(uartService);
-  
-  BLE.advertise();
-  lastSampleTime = micros();
+  uartService.begin();                            // service first...
+  txChar.setProperties(CHR_PROPS_NOTIFY);         // ...then its characteristic
+  txChar.setPermission(SECMODE_OPEN, SECMODE_NO_ACCESS);
+  txChar.setMaxLen(sizeof(txbuf));
+  txChar.begin();
+
+  Bluefruit.Advertising.addFlags(BLE_GAP_ADV_FLAGS_LE_ONLY_GENERAL_DISC_MODE);
+  Bluefruit.Advertising.addTxPower();
+  Bluefruit.Advertising.addService(uartService);
+  Bluefruit.ScanResponse.addName();               // name lives in scan response
+  Bluefruit.Advertising.restartOnDisconnect(true);
+  Bluefruit.Advertising.setInterval(32, 244);     // units of 0.625 ms
+  Bluefruit.Advertising.setFastTimeout(30);
+  Bluefruit.Advertising.start(0);                 // advertise forever
+
+  lastFlushMs = millis();
+  lastBattUs  = micros();
+  Serial.println("PaddleTrack advertising (Bluefruit, 1660 Hz IMU)");
 }
 
 void loop() {
-  BLEDevice central = BLE.central();
-
-  if (central) {
-    if (!centralConnected && central.connected()) {
-      centralConnected = true;
-      Serial.println("Connected to central: " + central.address());
-    }
-  } else if (centralConnected) {
-    centralConnected = false;
-    Serial.println("Disconnected from central");
-    BLE.advertise();
-  }
-
-  unsigned long currentTime = micros();
-
-  // Read Battery every 2 seconds
-  if (currentTime - lastBatteryReadTime > 2000000) {
-    digitalWrite(VBAT_ENABLE, LOW); 
-    delay(2); 
+  // ---- Battery every 2 s ----
+  uint32_t nowUs = micros();
+  if (nowUs - lastBattUs > 2000000UL) {
+    digitalWrite(VBAT_ENABLE, LOW);   // enable divider (active low)
+    delay(2);
     int rawADC = analogRead(PIN_VBAT);
-    digitalWrite(VBAT_ENABLE, HIGH); 
-    
-    float vbat = (rawADC / 4096.0) * 3.3 * (1510.0 / 510.0);
-    currentBatteryPct = (int)(((vbat - 3.2) / (4.2 - 3.2)) * 100.0);
-    
-    if (currentBatteryPct > 100) currentBatteryPct = 100;
-    if (currentBatteryPct < 0) currentBatteryPct = 0;
-    
-    lastBatteryReadTime = currentTime;
-    currentTime = micros(); 
+    digitalWrite(VBAT_ENABLE, HIGH);
+    float vbat = (rawADC / 4096.0f) * 3.6f * (1510.0f / 510.0f);
+    int pct = (int)(((vbat - 3.2f) / (4.2f - 3.2f)) * 100.0f);
+    batteryPct = constrain(pct, 0, 100);
+    lastBattUs = nowUs;
   }
 
-  unsigned long deltaTimeUs = currentTime - lastSampleTime;
-  lastSampleTime = currentTime;
-
-  float ax = myIMU.readFloatAccelX();
-  float ay = myIMU.readFloatAccelY();
-  float az = myIMU.readFloatAccelZ();
-  float gx = myIMU.readFloatGyroX();
-  float gy = myIMU.readFloatGyroY();
-  float gz = myIMU.readFloatGyroZ();
-
-  // 3. Pack the data into the binary struct
-  SensorPacket packet;
-  
-  // Multiply floats to preserve decimal precision before converting to 16-bit ints
-  // Accelerometer: +/- 4G (multiply by 1000 to keep 3 decimal places)
-  packet.ax = (int16_t)(ax * 1000);
-  packet.ay = (int16_t)(ay * 1000);
-  packet.az = (int16_t)(az * 1000);
-  
-  // Gyroscope: +/- 2000 dps (multiply by 10 to keep 1 decimal place)
-  packet.gx = (int16_t)(gx * 10);
-  packet.gy = (int16_t)(gy * 10);
-  packet.gz = (int16_t)(gz * 10);
-  
-  packet.dt = (uint16_t)(deltaTimeUs / 1000);
-  packet.batt = (uint8_t)currentBatteryPct;
-
-  // 4. Stream the raw bytes over BLE
-  if (centralConnected && txCharacteristic.subscribed()) {
-    txCharacteristic.writeValue((uint8_t*)&packet, sizeof(packet));
+  if (!connected) {
+    delay(1);
+    return;
   }
 
-  delay(10);
+  // ---- Capture a new IMU sample when the sensor flags data-ready ----
+  uint8_t status = 0;
+  myIMU.readRegister(&status, LSM6DS3_STATUS_REG);
+  if ((status & 0x01) && sampleCount < MAX_SAMPLES) {   // XLDA: fresh accel data
+    uint8_t raw[12];
+    if (myIMU.readRegisterRegion(raw, LSM6DS3_OUTX_L_G, 12) == 0) {
+      // burst layout is gyro(0..5) then accel(6..11); repack accel-first
+      uint16_t off = 2 + sampleCount * SAMPLE_BYTES;
+      memcpy(&txbuf[off + 0], &raw[6], 6);   // ax, ay, az
+      memcpy(&txbuf[off + 6], &raw[0], 6);   // gx, gy, gz
+      sampleCount++;
+    }
+  }
+
+  // ---- Flush a batched notification when full or after a short latency cap ----
+  BLEConnection* conn = Bluefruit.Connection(0);
+  uint16_t mtu = conn ? conn->getMtu() : 23;
+  uint16_t cap = (mtu > 5) ? ((mtu - 3 - 2) / SAMPLE_BYTES) : 1;
+  if (cap > MAX_SAMPLES) cap = MAX_SAMPLES;
+  if (cap < 1) cap = 1;
+
+  uint32_t nowMs = millis();
+  bool full    = sampleCount >= cap;
+  bool timeout = sampleCount > 0 && (nowMs - lastFlushMs >= 15);
+  if (full || timeout) {
+    txbuf[0] = (uint8_t)sampleCount;
+    txbuf[1] = (uint8_t)batteryPct;
+    uint16_t len = 2 + sampleCount * SAMPLE_BYTES;
+    if (txChar.notify(txbuf, len)) {
+      sampleCount = 0;
+      lastFlushMs = nowMs;
+    } else if (sampleCount >= MAX_SAMPLES) {
+      // notify queue full and buffer maxed: drop oldest batch to keep sampling
+      sampleCount = 0;
+      lastFlushMs = nowMs;
+    }
+  }
 }
