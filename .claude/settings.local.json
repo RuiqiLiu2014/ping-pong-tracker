@@ -38,7 +38,8 @@
       "Bash(flutter doctor *)",
       "Bash(grep -n \"ACCESS_FINE_LOCATION\\\\|ACCESS_COARSE_LOCATION\\\\|requestPermissions\\\\|neverForLocation\\\\|getPermissions\\\\|BLUETOOTH_SCAN\" /home/whale/.pub-cache/hosted/pub.dev/flutter_blue_plus_android-9.0.3/android/src/main/java/com/lib/flutter_blue_plus/FlutterBluePlusPlugin.java | head -60)",
       "Bash(find /home/whale/.pub-cache/hosted/pub.dev/flutter_blue_plus_android-9.0.3 -iname \"*.java\" -o -iname \"*.kt\" | head -20)",
-      "Bash(timeout 3 cat /dev/ttyACM1)"
+      "Bash(timeout 3 cat /dev/ttyACM1)",
+      "Bash(sed -n '/Future<int> requestMtu/,/^  }/p' /home/whale/.pub-cache/hosted/pub.dev/flutter_blue_plus-2.3.10/lib/src/bluetooth_device.dart)"
     ]
   }
 }

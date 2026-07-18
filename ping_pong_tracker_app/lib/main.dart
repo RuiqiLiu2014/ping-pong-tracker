@@ -1,5 +1,5 @@
 import 'dart:async';
-import 'dart:convert';
+import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 
@@ -105,24 +105,14 @@ class _BLETestScreenState extends State<BLETestScreen> {
     });
 
     try {
-      // 1. Connect WITHOUT triggering the ArduinoBLE MTU crash
+      // Connect without any MTU negotiation: the firmware's binary packet
+      // is 15 bytes, which fits the default 23-byte MTU with room to spare.
       await device.connect(
         license: License.nonprofit,
         autoConnect: false,
         mtu: null,
       );
       _targetDevice = device;
-
-      setState(() {
-        _connectionStatus = "Negotiating packet size...";
-      });
-
-      // 2. Give the board half a second to stabilize, then ask for a larger MTU
-      await Future.delayed(const Duration(milliseconds: 500));
-      await device.requestMtu(
-        255,
-      ); // 255 bytes is plenty for our 45-byte string
-      await Future.delayed(const Duration(milliseconds: 500));
 
       setState(() {
         _connectionStatus = "Discovering Services...";
@@ -167,14 +157,33 @@ class _BLETestScreenState extends State<BLETestScreen> {
       }
       _lastPacketTime = now;
 
-      String incomingString = utf8.decode(value).trim();
-      List<String> parsedValues = incomingString.split(',');
+      // The firmware sends a 15-byte packed binary struct, NOT text:
+      // int16 ax,ay,az (x1000), int16 gx,gy,gz (x10), uint16 dt_ms,
+      // uint8 batt — all little-endian. Decoding it as UTF-8 throws.
+      if (value.length >= 15) {
+        var byteData = ByteData.view(Uint8List.fromList(value).buffer);
 
-      // We now expect 8 values (ax, ay, az, gx, gy, gz, dt_ms, batt_pct)
-      if (parsedValues.length >= 8) {
+        double ax = byteData.getInt16(0, Endian.little) / 1000.0;
+        double ay = byteData.getInt16(2, Endian.little) / 1000.0;
+        double az = byteData.getInt16(4, Endian.little) / 1000.0;
+
+        double gx = byteData.getInt16(6, Endian.little) / 10.0;
+        double gy = byteData.getInt16(8, Endian.little) / 10.0;
+        double gz = byteData.getInt16(10, Endian.little) / 10.0;
+
+        // int dt = byteData.getUint16(12, Endian.little);
+        int batt = byteData.getUint8(14);
+
         setState(() {
-          _imuData = parsedValues.sublist(0, 6);
-          _batteryPct = parsedValues[7];
+          _imuData = [
+            ax.toStringAsFixed(3),
+            ay.toStringAsFixed(3),
+            az.toStringAsFixed(3),
+            gx.toStringAsFixed(1),
+            gy.toStringAsFixed(1),
+            gz.toStringAsFixed(1),
+          ];
+          _batteryPct = batt.toString();
         });
       }
     });
