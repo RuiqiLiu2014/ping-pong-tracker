@@ -6,6 +6,7 @@ import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:share_plus/share_plus.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'motion_estimator.dart';
 
 void main() {
   FlutterBluePlus.setLogLevel(LogLevel.info, color: true);
@@ -60,6 +61,7 @@ class _BLETestScreenState extends State<BLETestScreen>
   BluetoothDevice? _targetDevice;
   StreamSubscription<List<int>>? _charSubscription;
   StreamSubscription<List<ScanResult>>? _scanResultsSubscription;
+  StreamSubscription<BluetoothConnectionState>? _connStateSub;
   String _connectionStatus = "Disconnected";
   bool _isConnecting = false;
 
@@ -73,6 +75,9 @@ class _BLETestScreenState extends State<BLETestScreen>
   List<String> _imuData = ["0.00", "0.00", "0.00", "0.00", "0.00", "0.00"];
   // Battery % from packet byte 1 (not accurate without a battery attached).
   String _batteryPct = "--";
+
+  // Orientation + velocity estimator (sensor fusion), fed every sample.
+  final MotionEstimator _motion = MotionEstimator();
 
   int _samplesInWindow = 0;
   DateTime? _windowStart;
@@ -244,6 +249,7 @@ class _BLETestScreenState extends State<BLETestScreen>
     _tabController.dispose();
     _charSubscription?.cancel();
     _scanResultsSubscription?.cancel();
+    _connStateSub?.cancel();
     _targetDevice?.disconnect();
     super.dispose();
   }
@@ -298,6 +304,15 @@ class _BLETestScreenState extends State<BLETestScreen>
         mtu: null,
       );
       _targetDevice = device;
+
+      // Auto-clean up if the peripheral vanishes (powered off / out of range).
+      _connStateSub?.cancel();
+      _connStateSub = device.connectionState.listen((state) {
+        if (state == BluetoothConnectionState.disconnected &&
+            _connectionStatus != "Disconnected") {
+          _handleDisconnected();
+        }
+      });
 
       setState(() {
         _connectionStatus = "Negotiating packet size...";
@@ -373,6 +388,9 @@ class _BLETestScreenState extends State<BLETestScreen>
       gy = bd.getInt16(b + 8, Endian.little) * _gyroScaleDps;
       gz = bd.getInt16(b + 10, Endian.little) * _gyroScaleDps;
 
+      // Run the fusion filter at the true per-sample rate (fixed ODR).
+      _motion.update(ax, ay, az, gx, gy, gz);
+
       if (_isLogging && _capCount < kMaxLogSamples) {
         final double tSec =
             (startUs + (nowUs - startUs) * (s + 1) / count) / 1e6;
@@ -399,11 +417,26 @@ class _BLETestScreenState extends State<BLETestScreen>
     ];
   }
 
+  // User-initiated disconnect.
   void _disconnect() async {
     if (_isLogging) _stopLogging();
     await _charSubscription?.cancel();
     await _scanResultsSubscription?.cancel();
+    await _connStateSub?.cancel();
     await _targetDevice?.disconnect();
+    _resetConnectionUi();
+  }
+
+  // Peripheral dropped on its own (powered off / out of range).
+  void _handleDisconnected() {
+    if (_isLogging) _stopLogging();
+    _charSubscription?.cancel();
+    _connStateSub?.cancel();
+    _resetConnectionUi();
+  }
+
+  void _resetConnectionUi() {
+    if (!mounted) return;
     setState(() {
       _targetDevice = null;
       _isConnecting = false;
@@ -413,7 +446,12 @@ class _BLETestScreenState extends State<BLETestScreen>
       _sampleRateStr = "0";
       _batteryPct = "--";
       _imuData = ["0.00", "0.00", "0.00", "0.00", "0.00", "0.00"];
+      _motion.reset();
     });
+  }
+
+  void _calibrateMotion() {
+    setState(() => _motion.startCalibration());
   }
 
   // =========================================================================
@@ -559,9 +597,15 @@ class _BLETestScreenState extends State<BLETestScreen>
 
   Widget _buildConnectionTab() {
     final streaming = _connectionStatus == "Streaming Data";
-    return Center(
+    final m = _motion;
+    final String orientationText = m.calibrated
+        ? "Roll: ${m.roll.toStringAsFixed(0)}°   Pitch: ${m.pitch.toStringAsFixed(0)}°"
+        : (m.calibrating
+              ? "Calibrating… hold still (${(m.calProgress * 100).toStringAsFixed(0)}%)"
+              : "Not calibrated");
+    return SingleChildScrollView(
+      padding: const EdgeInsets.fromLTRB(16, 24, 16, 24),
       child: Column(
-        mainAxisAlignment: MainAxisAlignment.center,
         children: [
           Text(
             _connectionStatus,
@@ -576,7 +620,7 @@ class _BLETestScreenState extends State<BLETestScreen>
             "Sample Rate: $_sampleRateStr Hz",
             style: const TextStyle(fontSize: 16, color: Colors.grey),
           ),
-          const SizedBox(height: 40),
+          const SizedBox(height: 28),
           const Text(
             "Accelerometer (G)",
             style: TextStyle(fontWeight: FontWeight.bold),
@@ -585,7 +629,7 @@ class _BLETestScreenState extends State<BLETestScreen>
             "X: ${_imuData[0]}   Y: ${_imuData[1]}   Z: ${_imuData[2]}",
             style: const TextStyle(fontSize: 20),
           ),
-          const SizedBox(height: 20),
+          const SizedBox(height: 16),
           const Text(
             "Gyroscope (deg/s)",
             style: TextStyle(fontWeight: FontWeight.bold),
@@ -594,7 +638,32 @@ class _BLETestScreenState extends State<BLETestScreen>
             "X: ${_imuData[3]}   Y: ${_imuData[4]}   Z: ${_imuData[5]}",
             style: const TextStyle(fontSize: 20),
           ),
-          const SizedBox(height: 40),
+          const SizedBox(height: 24),
+          const Text(
+            "Orientation (relative to down)",
+            style: TextStyle(fontWeight: FontWeight.bold),
+          ),
+          Text(orientationText, style: const TextStyle(fontSize: 18)),
+          if (m.calibrated)
+            Text(
+              "Tilt from vertical: ${m.tilt.toStringAsFixed(0)}°",
+              style: const TextStyle(fontSize: 16, color: Colors.grey),
+            ),
+          const SizedBox(height: 16),
+          const Text("Velocity", style: TextStyle(fontWeight: FontWeight.bold)),
+          Text(
+            m.calibrated ? "Speed: ${m.speed.toStringAsFixed(2)} m/s" : "—",
+            style: const TextStyle(fontSize: 20),
+          ),
+          const SizedBox(height: 14),
+          OutlinedButton.icon(
+            onPressed: (streaming && !m.calibrating) ? _calibrateMotion : null,
+            icon: const Icon(Icons.explore),
+            label: Text(
+              m.calibrated ? "Recalibrate (hold still)" : "Calibrate (hold still)",
+            ),
+          ),
+          const SizedBox(height: 28),
           ElevatedButton(
             onPressed: _isConnecting || streaming
                 ? _disconnect
@@ -1020,3 +1089,4 @@ class _ChartPainter extends CustomPainter {
   bool shouldRepaint(covariant _ChartPainter old) =>
       old.count != count || old.t != t || old.colors != colors;
 }
+
