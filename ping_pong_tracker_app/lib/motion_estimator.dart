@@ -1,4 +1,5 @@
 import 'dart:math' as math;
+import 'dart:typed_data';
 
 /// Orientation + velocity estimator from a 6-axis IMU (accel + gyro).
 ///
@@ -173,10 +174,30 @@ class MotionEstimator {
 
   void _finishCalibration() {
     final double inv = 1.0 / _calN;
-    _bias[0] = _sgx * inv;
-    _bias[1] = _sgy * inv;
-    _bias[2] = _sgz * inv;
-    double mx = _sax * inv, my = _say * inv, mz = _saz * inv;
+    initFromRest(
+      _sax * inv,
+      _say * inv,
+      _saz * inv,
+      _sgx * inv,
+      _sgy * inv,
+      _sgz * inv,
+    );
+  }
+
+  /// Initialize directly from a known resting sample (mean accel in g, mean
+  /// gyro in deg/s). Sets gyro bias and the initial gravity-aligned orientation.
+  void initFromRest(
+    double ax,
+    double ay,
+    double az,
+    double gx,
+    double gy,
+    double gz,
+  ) {
+    _bias[0] = gx;
+    _bias[1] = gy;
+    _bias[2] = gz;
+    double mx = ax, my = ay, mz = az;
     final double n = math.sqrt(mx * mx + my * my + mz * mz);
     if (n > 1e-6) {
       mx /= n;
@@ -207,4 +228,56 @@ class MotionEstimator {
     calibrating = false;
     calibrated = true;
   }
+}
+
+/// Result of replaying a recorded log through the estimator.
+class SpeedSeries {
+  final Float32List speed; // |velocity| per sample, m/s
+  final double maxSpeed;
+  const SpeedSeries(this.speed, this.maxSpeed);
+}
+
+/// Recompute the velocity magnitude over a recorded log from its raw IMU data.
+/// `axes` = [ax, ay, az, gx, gy, gz] (g and deg/s). Assumes the log begins with
+/// the board roughly at rest (a short initial window seeds bias + gravity).
+SpeedSeries computeSpeedSeries(List<Float32List> axes, int count) {
+  final speed = Float32List(count);
+  if (count == 0 || axes.length < 6) return SpeedSeries(speed, 0);
+
+  final m = MotionEstimator();
+  // Seed calibration from a short resting window at the start of the log.
+  final int k = math.min(415, math.max(1, count ~/ 4)); // ~0.25 s at 1660 Hz
+  double sax = 0, say = 0, saz = 0, sgx = 0, sgy = 0, sgz = 0;
+  for (int i = 0; i < k; i++) {
+    sax += axes[0][i];
+    say += axes[1][i];
+    saz += axes[2][i];
+    sgx += axes[3][i];
+    sgy += axes[4][i];
+    sgz += axes[5][i];
+  }
+  final double inv = 1.0 / k;
+  m.initFromRest(
+    sax * inv,
+    say * inv,
+    saz * inv,
+    sgx * inv,
+    sgy * inv,
+    sgz * inv,
+  );
+
+  double maxS = 0;
+  for (int i = 0; i < count; i++) {
+    m.update(
+      axes[0][i],
+      axes[1][i],
+      axes[2][i],
+      axes[3][i],
+      axes[4][i],
+      axes[5][i],
+    );
+    speed[i] = m.speed;
+    if (m.speed > maxS) maxS = m.speed;
+  }
+  return SpeedSeries(speed, maxS);
 }

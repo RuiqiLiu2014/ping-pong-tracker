@@ -104,6 +104,8 @@ class _BLETestScreenState extends State<BLETestScreen>
   final List<SavedLog> _logs = [];
   int _logSeq = 0;
   SavedLog? _selectedLog;
+  // Velocity magnitude recomputed from each log's raw data (cached by log id).
+  final Map<int, SpeedSeries> _speedCache = {};
 
   // ---- Settings (persisted) ----
   static const String _kAutoTimeoutKey = "autoTimeoutSec";
@@ -754,6 +756,13 @@ class _BLETestScreenState extends State<BLETestScreen>
   }
 
   Widget _buildLogDetail(SavedLog log) {
+    final ss = _speedCache.putIfAbsent(
+      log.id,
+      () => computeSpeedSeries(log.axes, log.count),
+    );
+    // Fixed back/title/actions bar, then one lazy list holding the charts
+    // (velocity on top) followed by the CSV rows, so everything scrolls
+    // together while the rows stay lazily built.
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
@@ -786,12 +795,39 @@ class _BLETestScreenState extends State<BLETestScreen>
             ],
           ),
         ),
+        Expanded(
+          child: ListView.builder(
+            itemCount: 1 + log.count,
+            itemBuilder: (context, i) {
+              if (i == 0) return _logCharts(log, ss);
+              return _csvRow(log, i - 1);
+            },
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _logCharts(SavedLog log, SpeedSeries ss) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        _chartSection(
+          "Speed (m/s)",
+          log,
+          [ss.speed],
+          const [Colors.indigo],
+          null,
+          forcedMin: 0,
+          cornerText: "Max: ${ss.maxSpeed.toStringAsFixed(2)} m/s",
+        ),
         _chartSection(
           "Accelerometer (G)",
           log,
           [log.axes[0], log.axes[1], log.axes[2]],
           _accelColors,
           _accelLabels,
+          centerZero: true,
         ),
         _chartSection(
           "Gyroscope (deg/s)",
@@ -799,6 +835,7 @@ class _BLETestScreenState extends State<BLETestScreen>
           [log.axes[3], log.axes[4], log.axes[5]],
           _gyroColors,
           _gyroLabels,
+          centerZero: true,
         ),
         const Divider(height: 1),
         const Padding(
@@ -812,8 +849,27 @@ class _BLETestScreenState extends State<BLETestScreen>
             ),
           ),
         ),
-        Expanded(child: _buildCsvList(log)),
       ],
+    );
+  }
+
+  Widget _csvRow(SavedLog log, int i) {
+    final row = StringBuffer(log.t[i].toStringAsFixed(4));
+    for (int a = 0; a < 6; a++) {
+      row.write(', ');
+      row.write(log.axes[a][i].toStringAsFixed(a < 3 ? 4 : 2));
+    }
+    return SizedBox(
+      height: 18,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 12),
+        child: Text(
+          row.toString(),
+          style: const TextStyle(fontFamily: "monospace", fontSize: 11),
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+        ),
+      ),
     );
   }
 
@@ -822,8 +878,11 @@ class _BLETestScreenState extends State<BLETestScreen>
     SavedLog log,
     List<Float32List> series,
     List<Color> colors,
-    List<String> labels,
-  ) {
+    List<String>? labels, {
+    double? forcedMin,
+    String? cornerText,
+    bool centerZero = false,
+  }) {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
@@ -839,12 +898,20 @@ class _BLETestScreenState extends State<BLETestScreen>
           child: Padding(
             padding: const EdgeInsets.symmetric(horizontal: 8),
             child: CustomPaint(
-              painter: _ChartPainter(log.t, series, log.count, colors),
+              painter: _ChartPainter(
+                log.t,
+                series,
+                log.count,
+                colors,
+                forcedMin: forcedMin,
+                cornerText: cornerText,
+                centerZero: centerZero,
+              ),
               child: const SizedBox.expand(),
             ),
           ),
         ),
-        _legend(colors, labels),
+        if (labels != null) _legend(colors, labels),
       ],
     );
   }
@@ -867,29 +934,6 @@ class _BLETestScreenState extends State<BLETestScreen>
           );
         }),
       ),
-    );
-  }
-
-  Widget _buildCsvList(SavedLog log) {
-    return ListView.builder(
-      itemCount: log.count,
-      itemExtent: 18,
-      itemBuilder: (context, i) {
-        final row = StringBuffer(log.t[i].toStringAsFixed(4));
-        for (int a = 0; a < 6; a++) {
-          row.write(', ');
-          row.write(log.axes[a][i].toStringAsFixed(a < 3 ? 4 : 2));
-        }
-        return Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 12),
-          child: Text(
-            row.toString(),
-            style: const TextStyle(fontFamily: "monospace", fontSize: 11),
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
-          ),
-        );
-      },
     );
   }
 
@@ -956,8 +1000,19 @@ class _ChartPainter extends CustomPainter {
   final List<Float32List> series;
   final int count;
   final List<Color> colors;
+  final double? forcedMin; // if set, pin the y-axis bottom here (no auto-scale)
+  final String? cornerText; // optional label drawn in the top-right corner
+  final bool centerZero; // if true, y-axis is symmetric about 0 (0 centered)
 
-  _ChartPainter(this.t, this.series, this.count, this.colors);
+  _ChartPainter(
+    this.t,
+    this.series,
+    this.count,
+    this.colors, {
+    this.forcedMin,
+    this.cornerText,
+    this.centerZero = false,
+  });
 
   @override
   void paint(Canvas canvas, Size size) {
@@ -1011,10 +1066,25 @@ class _ChartPainter extends CustomPainter {
       vMin = -1;
       vMax = 1;
     }
-    if (vMax <= vMin) vMax = vMin + 1;
-    final vpad = (vMax - vMin) * 0.05;
-    vMin -= vpad;
-    vMax += vpad;
+    if (forcedMin != null) {
+      // Pin the bottom (e.g. 0 for speed); only pad/auto-scale the top.
+      vMin = forcedMin!;
+      if (vMax <= vMin) vMax = vMin + 1;
+      vMax += (vMax - vMin) * 0.08;
+    } else if (centerZero) {
+      // Symmetric about 0 so 0.0 sits exactly in the middle; autoscale extent.
+      final double av = vMin.abs(), bv = vMax.abs();
+      double mag = av > bv ? av : bv;
+      if (mag <= 0) mag = 1;
+      mag *= 1.05; // padding
+      vMin = -mag;
+      vMax = mag;
+    } else {
+      if (vMax <= vMin) vMax = vMin + 1;
+      final vpad = (vMax - vMin) * 0.05;
+      vMin -= vpad;
+      vMax += vpad;
+    }
 
     double xOf(double tt) =>
         plot.left + (tt - tMin) / (tMax - tMin) * plot.width;
@@ -1075,6 +1145,22 @@ class _ChartPainter extends CustomPainter {
       }
       canvas.drawPath(path, paint);
     }
+
+    // Optional corner label (e.g. max speed), top-right inside the plot.
+    if (cornerText != null) {
+      final tp = TextPainter(
+        text: TextSpan(
+          text: cornerText,
+          style: const TextStyle(
+            color: Colors.black87,
+            fontSize: 12,
+            fontWeight: FontWeight.bold,
+          ),
+        ),
+        textDirection: TextDirection.ltr,
+      )..layout();
+      tp.paint(canvas, Offset(plot.right - tp.width - 6, plot.top + 4));
+    }
   }
 
   void _text(Canvas c, String s, Offset o, Color color, {double size = 10}) {
@@ -1087,6 +1173,11 @@ class _ChartPainter extends CustomPainter {
 
   @override
   bool shouldRepaint(covariant _ChartPainter old) =>
-      old.count != count || old.t != t || old.colors != colors;
+      old.count != count ||
+      old.t != t ||
+      old.colors != colors ||
+      old.forcedMin != forcedMin ||
+      old.cornerText != cornerText ||
+      old.centerZero != centerZero;
 }
 
