@@ -1,12 +1,16 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
+import 'dart:math' as math;
 import 'dart:typed_data';
+import 'package:archive/archive.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:share_plus/share_plus.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'motion_estimator.dart';
+import 'hit_detector.dart';
 
 void main() {
   FlutterBluePlus.setLogLevel(LogLevel.info, color: true);
@@ -37,6 +41,8 @@ class SavedLog {
   final List<Float32List> axes; // ax, ay, az, gx, gy, gz
   final int count;
   final double durationSec;
+  String name; // user label; empty => display falls back to "Log #id"
+  final List<double> hitTimes; // detected ball-hit times (s, rebased to log)
 
   SavedLog(
     this.id,
@@ -44,8 +50,12 @@ class SavedLog {
     this.t,
     this.axes,
     this.count,
-    this.durationSec,
-  );
+    this.durationSec, {
+    this.name = "",
+    this.hitTimes = const [],
+  });
+
+  String get displayName => name.isEmpty ? "Log #$id" : name;
 }
 
 class BLETestScreen extends StatefulWidget {
@@ -79,26 +89,59 @@ class _BLETestScreenState extends State<BLETestScreen>
   // Orientation + velocity estimator (sensor fusion), fed every sample.
   final MotionEstimator _motion = MotionEstimator();
 
+  // Ball-hit detector, fed every sample; detected hit times (absolute stream
+  // seconds) are buffered so a finalized log can mark the hits inside its window.
+  final HitDetector _hitDetector = HitDetector();
+  final List<double> _recentHits = [];
+
   int _samplesInWindow = 0;
   DateTime? _windowStart;
   String _sampleRateStr = "0";
 
   static const double _accelScaleG = 0.488 / 1000.0; // +/-16 g  -> G per count
   static const double _gyroScaleDps = 70.0 / 1000.0; // 2000 dps -> dps per count
+  static const double _odrHz = 1660.0; // fixed IMU output data rate
 
-  // ---- Logging ----
-  // Auto-timeout caps a session, so a working buffer of 20k samples (~12 s at
-  // 1660 Hz) is plenty of headroom above the 5 s max.
-  static const int kMaxLogSamples = 20000;
-  bool _isLogging = false;
-  final Stopwatch _logStopwatch = Stopwatch();
-  int _lastLogPacketUs = 0;
+  // ---- Auto-capture (motion-triggered logging) ----
+  // Instead of a manual start/stop button, we continuously watch the incoming
+  // stream and auto-record a fixed window around any strong motion (a swing).
+  // A ring buffer keeps the most recent samples so a capture can prepend
+  // history from BEFORE the trigger; an equal (mirrored) window is then
+  // recorded AFTER it. The window is a fixed duration, NOT "until still", so
+  // each acceleration peak yields its own single-peak capture — one physical
+  // stroke can therefore produce two logs (the forward swing and the recovery).
+  //
+  // Trigger metric: raw accelerometer magnitude |a| in g (≈1 g at rest, spikes
+  // well above that during a swing) — needs no orientation/calibration. We fire
+  // on the rising edge (below→above threshold) so a single peak triggers once.
+  static const int kMaxLogSamples = 20000; // ~12 s headroom at 1660 Hz
+  static const int _kRingCap = 2500; // ~1.5 s of pre-trigger history
+
+  bool _armed = false; // auto-capture enabled (watching for motion)
+  bool _recording = false; // currently capturing a window
+  bool _wasAboveThresh = false; // prev sample above threshold (edge detection)
+
+  // Manual logging (used when automatic logging is turned off): a Start/Stop
+  // button records straight into the capture buffer until stopped or a timeout.
+  bool _isManualLogging = false;
   Timer? _autoStopTimer;
 
-  // Reused capture buffers for the in-progress session.
+  // Free-running clock + last-packet time, for continuous per-sample timestamps
+  // (kept running the whole session so ring/capture times are consistent).
+  final Stopwatch _streamStopwatch = Stopwatch();
+  int _lastStreamPacketUs = 0;
+
+  // Ring buffer of recent samples (absolute stream time + 6 axes).
+  Float64List? _ringT;
+  List<Float32List>? _ringAxes;
+  int _ringHead = 0; // next write slot
+  int _ringLen = 0; // valid samples held
+
+  // In-progress capture; times are absolute stream seconds (rebased on finalize).
   Float64List? _capT;
   List<Float32List>? _capAxes;
   int _capCount = 0;
+  double _triggerSec = 0; // absolute time the current capture triggered
 
   // Finished logs (newest first) and the one currently open for viewing.
   final List<SavedLog> _logs = [];
@@ -107,9 +150,20 @@ class _BLETestScreenState extends State<BLETestScreen>
   // Velocity magnitude recomputed from each log's raw data (cached by log id).
   final Map<int, SpeedSeries> _speedCache = {};
 
-  // ---- Settings (persisted) ----
-  static const String _kAutoTimeoutKey = "autoTimeoutSec";
-  double _autoTimeoutSec = 4.0; // 1.0 - 5.0, 0.1 steps
+  // ---- Settings (persisted): auto-capture tuning (placeholder defaults) ----
+  static const String _kAutoLoggingKey = "autoLoggingEnabled";
+  static const String _kTriggerGKey = "accelTriggerG";
+  static const String _kPreTrigKey = "preTriggerSec";
+  static const String _kPostTrigKey = "postTriggerSec";
+  static const String _kManualTimeoutKey = "manualTimeoutSec";
+  static const String _kHitThreshKey = "hitThreshG";
+  static const String _kLogSeqKey = "logSeq"; // last issued log number
+  bool _autoLoggingEnabled = true; // false => manual Start/Stop button
+  double _accelTriggerG = 3.0; // |a| threshold to start a capture (g)
+  double _preTriggerSec = 0.5; // window recorded before the trigger
+  double _postTriggerSec = 0.5; // window recorded after the trigger (mirror)
+  double _manualTimeoutSec = 4.0; // manual logging auto-stop (0.1 - 5.0 s)
+  double _hitThreshG = 0.5; // ball-hit vibration threshold (lower = sensitive)
   SharedPreferences? _prefs;
 
   // Accelerometer and gyroscope are drawn on separate, independently-scaled
@@ -145,10 +199,22 @@ class _BLETestScreenState extends State<BLETestScreen>
   Future<void> _loadSettings() async {
     final prefs = await SharedPreferences.getInstance();
     _prefs = prefs;
-    final v = prefs.getDouble(_kAutoTimeoutKey);
-    if (v != null && mounted) {
-      setState(() => _autoTimeoutSec = v.clamp(1.0, 5.0));
-    }
+    final autoLog = prefs.getBool(_kAutoLoggingKey);
+    final tg = prefs.getDouble(_kTriggerGKey);
+    final pre = prefs.getDouble(_kPreTrigKey);
+    final post = prefs.getDouble(_kPostTrigKey);
+    final timeout = prefs.getDouble(_kManualTimeoutKey);
+    final hitThr = prefs.getDouble(_kHitThreshKey);
+    if (!mounted) return;
+    setState(() {
+      if (autoLog != null) _autoLoggingEnabled = autoLog;
+      if (tg != null) _accelTriggerG = tg.clamp(1.0, 8.0);
+      if (pre != null) _preTriggerSec = pre.clamp(0.1, 1.5);
+      if (post != null) _postTriggerSec = post.clamp(0.1, 1.5);
+      if (timeout != null) _manualTimeoutSec = timeout.clamp(0.1, 5.0);
+      if (hitThr != null) _hitThreshG = hitThr.clamp(0.1, 1.5);
+      _hitDetector.threshold = _hitThreshG;
+    });
   }
 
   // ---- Persistent log store (binary files in the app documents dir) ----
@@ -167,7 +233,13 @@ class _BLETestScreenState extends State<BLETestScreen>
     try {
       final dir = await _logsDir();
       final n = log.count;
-      final bd = ByteData(4 + n * 8 + 6 * n * 4);
+      // Name and hit-times are appended at the end so older files without them
+      // still load, and a rename only rewrites this small file.
+      final nameBytes = utf8.encode(log.name);
+      final hits = log.hitTimes;
+      final bd = ByteData(
+        4 + n * 8 + 6 * n * 4 + 4 + nameBytes.length + 4 + hits.length * 8,
+      );
       int off = 0;
       bd.setInt32(off, n, Endian.little);
       off += 4;
@@ -182,7 +254,18 @@ class _BLETestScreenState extends State<BLETestScreen>
           off += 4;
         }
       }
-      await _logFile(dir, log).writeAsBytes(bd.buffer.asUint8List(), flush: true);
+      bd.setInt32(off, nameBytes.length, Endian.little);
+      off += 4;
+      final u8 = bd.buffer.asUint8List();
+      u8.setRange(off, off + nameBytes.length, nameBytes);
+      off += nameBytes.length;
+      bd.setInt32(off, hits.length, Endian.little);
+      off += 4;
+      for (final h in hits) {
+        bd.setFloat64(off, h, Endian.little);
+        off += 8;
+      }
+      await _logFile(dir, log).writeAsBytes(u8, flush: true);
     } catch (_) {
       // best-effort; a failed persist just means it won't survive restart
     }
@@ -219,18 +302,48 @@ class _BLETestScreenState extends State<BLETestScreen>
           }
           return col;
         });
-        loaded.add(SavedLog(id, ts, t, axes, n, t[n - 1]));
+        // Optional trailing name (absent in older files).
+        String name = "";
+        if (bytes.length >= off + 4) {
+          final nameLen = bd.getInt32(off, Endian.little);
+          off += 4;
+          if (nameLen > 0 && bytes.length >= off + nameLen) {
+            name = utf8.decode(bytes.sublist(off, off + nameLen));
+            off += nameLen;
+          }
+        }
+        // Optional trailing hit times (absent in older files).
+        final hitTimes = <double>[];
+        if (bytes.length >= off + 4) {
+          final hitCount = bd.getInt32(off, Endian.little);
+          off += 4;
+          if (hitCount > 0 && bytes.length >= off + hitCount * 8) {
+            for (int i = 0; i < hitCount; i++) {
+              hitTimes.add(bd.getFloat64(off, Endian.little));
+              off += 8;
+            }
+          }
+        }
+        loaded.add(
+          SavedLog(id, ts, t, axes, n, t[n - 1], name: name, hitTimes: hitTimes),
+        );
         if (id > maxId) maxId = id;
       }
       loaded.sort((a, b) => b.id.compareTo(a.id)); // newest first
+      // Numbering: if no logs remain, restart at 1; otherwise continue from the
+      // last issued number (persisted, so deleting the newest doesn't reuse it).
+      final prefs = await SharedPreferences.getInstance();
+      final int persistedSeq = prefs.getInt(_kLogSeqKey) ?? 0;
+      final int nextBase = loaded.isEmpty ? 0 : math.max(persistedSeq, maxId);
       if (mounted) {
         setState(() {
           _logs
             ..clear()
             ..addAll(loaded);
-          if (maxId > _logSeq) _logSeq = maxId;
+          _logSeq = nextBase;
         });
       }
+      await prefs.setInt(_kLogSeqKey, nextBase);
     } catch (_) {
       // no persisted logs / unreadable store
     }
@@ -349,6 +462,17 @@ class _BLETestScreenState extends State<BLETestScreen>
 
   void _subscribeToCharacteristic(BluetoothCharacteristic char) async {
     await char.setNotifyValue(true);
+    // Allocate the ring + capture buffers and start a free-running clock so the
+    // ring stays warm (auto-capture history is ready the moment we arm).
+    _ensureCaptureBuffers();
+    _ringLen = 0;
+    _ringHead = 0;
+    _lastStreamPacketUs = 0;
+    _hitDetector.reset();
+    _recentHits.clear();
+    _streamStopwatch
+      ..reset()
+      ..start();
     setState(() {
       _connectionStatus = "Streaming Data";
       _isConnecting = false;
@@ -377,8 +501,11 @@ class _BLETestScreenState extends State<BLETestScreen>
       _windowStart = now;
     }
 
-    final int startUs = _lastLogPacketUs;
-    final int nowUs = _isLogging ? _logStopwatch.elapsedMicroseconds : 0;
+    // Per-sample timestamps interpolated across the packet using the
+    // free-running clock, so ring/capture times are continuous regardless of
+    // whether we're currently recording.
+    final int prevUs = _lastStreamPacketUs;
+    final int nowUs = _streamStopwatch.elapsedMicroseconds;
 
     double ax = 0, ay = 0, az = 0, gx = 0, gy = 0, gz = 0;
     for (int s = 0; s < count; s++) {
@@ -393,21 +520,19 @@ class _BLETestScreenState extends State<BLETestScreen>
       // Run the fusion filter at the true per-sample rate (fixed ODR).
       _motion.update(ax, ay, az, gx, gy, gz);
 
-      if (_isLogging && _capCount < kMaxLogSamples) {
-        final double tSec =
-            (startUs + (nowUs - startUs) * (s + 1) / count) / 1e6;
-        _capT![_capCount] = tSec;
-        _capAxes![0][_capCount] = ax;
-        _capAxes![1][_capCount] = ay;
-        _capAxes![2][_capCount] = az;
-        _capAxes![3][_capCount] = gx;
-        _capAxes![4][_capCount] = gy;
-        _capAxes![5][_capCount] = gz;
-        _capCount++;
-        if (_capCount >= kMaxLogSamples) _stopLogging(); // safety cap
+      final double tSec = (prevUs + (nowUs - prevUs) * (s + 1) / count) / 1e6;
+      final double amag = math.sqrt(ax * ax + ay * ay + az * az);
+
+      // Ball-hit detection runs continuously (so pre-trigger history is covered).
+      if (_hitDetector.update(tSec, amag)) _recordHit(tSec);
+
+      if (_autoLoggingEnabled) {
+        _processAutoCapture(tSec, amag, ax, ay, az, gx, gy, gz);
+      } else if (_isManualLogging) {
+        _appendManualSample(tSec, ax, ay, az, gx, gy, gz);
       }
     }
-    if (_isLogging) _lastLogPacketUs = nowUs;
+    _lastStreamPacketUs = nowUs;
 
     _imuData = [
       ax.toStringAsFixed(3),
@@ -421,7 +546,7 @@ class _BLETestScreenState extends State<BLETestScreen>
 
   // User-initiated disconnect.
   void _disconnect() async {
-    if (_isLogging) _stopLogging();
+    _finalizeInFlight();
     await _charSubscription?.cancel();
     await _scanResultsSubscription?.cancel();
     await _connStateSub?.cancel();
@@ -431,10 +556,19 @@ class _BLETestScreenState extends State<BLETestScreen>
 
   // Peripheral dropped on its own (powered off / out of range).
   void _handleDisconnected() {
-    if (_isLogging) _stopLogging();
+    _finalizeInFlight();
     _charSubscription?.cancel();
     _connStateSub?.cancel();
     _resetConnectionUi();
+  }
+
+  // Save any in-progress capture (auto window or manual session) before teardown.
+  void _finalizeInFlight() {
+    _autoStopTimer?.cancel();
+    if (_recording || _isManualLogging) {
+      _isManualLogging = false;
+      _finalizeCapture();
+    }
   }
 
   void _resetConnectionUi() {
@@ -448,6 +582,18 @@ class _BLETestScreenState extends State<BLETestScreen>
       _sampleRateStr = "0";
       _batteryPct = "--";
       _imuData = ["0.00", "0.00", "0.00", "0.00", "0.00", "0.00"];
+      _armed = false;
+      _recording = false;
+      _wasAboveThresh = false;
+      _isManualLogging = false;
+      _streamStopwatch
+        ..stop()
+        ..reset();
+      _lastStreamPacketUs = 0;
+      _ringLen = 0;
+      _ringHead = 0;
+      _hitDetector.reset();
+      _recentHits.clear();
       _motion.reset();
     });
   }
@@ -457,53 +603,291 @@ class _BLETestScreenState extends State<BLETestScreen>
   }
 
   // =========================================================================
-  // Logging control
+  // Auto-capture (motion-triggered logging)
   // =========================================================================
-  void _startLogging() {
+  void _ensureCaptureBuffers() {
     _capT ??= Float64List(kMaxLogSamples);
     _capAxes ??= List.generate(6, (_) => Float32List(kMaxLogSamples));
+    _ringT ??= Float64List(_kRingCap);
+    _ringAxes ??= List.generate(6, (_) => Float32List(_kRingCap));
+  }
+
+  // Arm/disarm the auto-capture watcher (only meaningful while streaming).
+  void _toggleArmed() {
+    setState(() {
+      if (_armed) {
+        if (_recording) _finalizeCapture(); // flush any in-flight window
+        _armed = false;
+      } else {
+        _ensureCaptureBuffers();
+        // Assume "above" so a capture needs a genuine below→above edge; this
+        // avoids triggering immediately if we arm mid-motion.
+        _wasAboveThresh = true;
+        _armed = true;
+      }
+    });
+  }
+
+  // Ring-buffer + trigger state machine, run once per IMU sample. The ring is
+  // always kept warm; when armed, a rising-edge threshold crossing starts a
+  // capture seeded with pre-trigger history, then a fixed (mirrored) post
+  // window is recorded before finalizing — so each peak is one single-peak
+  // capture. Called from the packet loop; the 10 Hz UI timer reflects changes.
+  void _processAutoCapture(
+    double t,
+    double amag,
+    double ax,
+    double ay,
+    double az,
+    double gx,
+    double gy,
+    double gz,
+  ) {
+    if (_ringAxes == null) return; // buffers not allocated yet
+
+    // Always push into the ring so pre-trigger history is fresh.
+    _ringT![_ringHead] = t;
+    _ringAxes![0][_ringHead] = ax;
+    _ringAxes![1][_ringHead] = ay;
+    _ringAxes![2][_ringHead] = az;
+    _ringAxes![3][_ringHead] = gx;
+    _ringAxes![4][_ringHead] = gy;
+    _ringAxes![5][_ringHead] = gz;
+    _ringHead = (_ringHead + 1) % _kRingCap;
+    if (_ringLen < _kRingCap) _ringLen++;
+
+    final bool above = amag >= _accelTriggerG;
+
+    if (_recording) {
+      if (_capCount < kMaxLogSamples) {
+        _capT![_capCount] = t;
+        _capAxes![0][_capCount] = ax;
+        _capAxes![1][_capCount] = ay;
+        _capAxes![2][_capCount] = az;
+        _capAxes![3][_capCount] = gx;
+        _capAxes![4][_capCount] = gy;
+        _capAxes![5][_capCount] = gz;
+        _capCount++;
+      }
+      // Fixed window: stop once the mirrored post-trigger time has elapsed
+      // (or the safety buffer fills).
+      final bool done = (t - _triggerSec) >= _postTriggerSec;
+      final bool full = _capCount >= kMaxLogSamples;
+      if (done || full) _finalizeCapture();
+    } else if (_armed && above && !_wasAboveThresh) {
+      _startCapture(t); // rising edge → new single-peak capture
+    }
+
+    _wasAboveThresh = above;
+  }
+
+  // Begin a capture: copy the most recent pre-trigger window from the ring
+  // (which already includes the triggering sample) into the capture buffer.
+  void _startCapture(double triggerT) {
+    final int pre = math.min(_ringLen, (_preTriggerSec * _odrHz).round());
+    int idx = (_ringHead - pre + _kRingCap) % _kRingCap;
+    for (int j = 0; j < pre; j++) {
+      _capT![j] = _ringT![idx];
+      for (int a = 0; a < 6; a++) {
+        _capAxes![a][j] = _ringAxes![a][idx];
+      }
+      idx = (idx + 1) % _kRingCap;
+    }
+    _capCount = pre;
+    _triggerSec = triggerT;
+    _recording = true;
+  }
+
+  // Record a detected ball-hit (absolute stream time); keep a bounded history
+  // so a capture that reaches back through the ring buffer still sees its hits.
+  void _recordHit(double t) {
+    _recentHits.add(t);
+    while (_recentHits.isNotEmpty && _recentHits.first < t - 13.0) {
+      _recentHits.removeAt(0); // ~13 s covers the max capture length
+    }
+  }
+
+  // Snapshot the captured window into a right-sized SavedLog (times rebased so
+  // the log starts at t = 0), keeping it armed for the next swing.
+  void _finalizeCapture() {
+    _recording = false;
+    if (_capCount > 1) {
+      final int n = _capCount;
+      final double t0 = _capT![0];
+      final double tEnd = _capT![n - 1];
+      final t = Float64List(n);
+      for (int i = 0; i < n; i++) {
+        t[i] = _capT![i] - t0;
+      }
+      final axes = List.generate(
+        6,
+        (a) => Float32List(n)..setRange(0, n, _capAxes![a]),
+      );
+      // Ball-hits that fall inside this window, rebased to the log start.
+      final hits = <double>[
+        for (final h in _recentHits)
+          if (h >= t0 && h <= tEnd) h - t0,
+      ];
+      final created = SavedLog(
+        ++_logSeq,
+        DateTime.now(),
+        t,
+        axes,
+        n,
+        t[n - 1],
+        hitTimes: hits,
+      );
+      _logs.insert(0, created);
+      _prefs?.setInt(_kLogSeqKey, _logSeq); // remember the last issued number
+      _persistLog(created); // survive restarts
+    }
+    _capCount = 0;
+  }
+
+  // =========================================================================
+  // Manual logging (used when automatic logging is turned off)
+  // =========================================================================
+  void _setAutoLogging(bool enabled) {
+    setState(() {
+      // Stop whichever mode was active before switching.
+      _autoStopTimer?.cancel();
+      if (_isManualLogging) {
+        _isManualLogging = false;
+        _finalizeCapture();
+      }
+      if (_recording) _finalizeCapture();
+      _armed = false;
+      _autoLoggingEnabled = enabled;
+    });
+    _prefs?.setBool(_kAutoLoggingKey, enabled);
+  }
+
+  void _startLogging() {
+    _ensureCaptureBuffers();
     _autoStopTimer?.cancel();
     _autoStopTimer = Timer(
-      Duration(milliseconds: (_autoTimeoutSec * 1000).round()),
+      Duration(milliseconds: (_manualTimeoutSec * 1000).round()),
       () {
-        if (_isLogging) _stopLogging();
+        if (_isManualLogging) _stopLogging();
       },
     );
     setState(() {
       _capCount = 0;
-      _lastLogPacketUs = 0;
-      _logStopwatch
-        ..reset()
-        ..start();
-      _isLogging = true;
+      _isManualLogging = true;
     });
   }
 
   void _stopLogging() {
     _autoStopTimer?.cancel();
-    _logStopwatch.stop();
-    // Snapshot the captured portion into a right-sized SavedLog.
-    SavedLog? created;
-    if (_capCount > 0) {
-      final int n = _capCount;
-      final t = Float64List(n)..setRange(0, n, _capT!);
-      final axes = List.generate(
-        6,
-        (a) => Float32List(n)..setRange(0, n, _capAxes![a]),
-      );
-      created = SavedLog(++_logSeq, DateTime.now(), t, axes, n, t[n - 1]);
-      _logs.insert(0, created);
+    setState(() {
+      _isManualLogging = false;
+      _finalizeCapture(); // snapshot + persist (times rebased to start at 0)
+    });
+  }
+
+  // Append one live sample to the manual capture buffer (times rebased on stop).
+  void _appendManualSample(
+    double t,
+    double ax,
+    double ay,
+    double az,
+    double gx,
+    double gy,
+    double gz,
+  ) {
+    if (_capCount >= kMaxLogSamples) {
+      _stopLogging(); // safety cap
+      return;
     }
-    setState(() => _isLogging = false);
-    if (created != null) _persistLog(created); // survive restarts
+    _capT![_capCount] = t;
+    _capAxes![0][_capCount] = ax;
+    _capAxes![1][_capCount] = ay;
+    _capAxes![2][_capCount] = az;
+    _capAxes![3][_capCount] = gx;
+    _capAxes![4][_capCount] = gy;
+    _capAxes![5][_capCount] = gz;
+    _capCount++;
   }
 
   void _deleteLog(SavedLog log) {
     _deleteLogFile(log);
     setState(() {
       _logs.remove(log);
+      _speedCache.remove(log.id);
       if (_selectedLog == log) _selectedLog = null;
+      // Once the last log is gone, restart numbering at 1 next capture.
+      if (_logs.isEmpty) {
+        _logSeq = 0;
+        _prefs?.setInt(_kLogSeqKey, 0);
+      }
     });
+  }
+
+  // Delete every log (with confirmation, since it's irreversible).
+  Future<void> _deleteAllLogs() async {
+    if (_logs.isEmpty) return;
+    final confirm = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text("Delete all logs?"),
+        content: Text(
+          "This permanently deletes all ${_logs.length} log(s). "
+          "This can't be undone.",
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text("Cancel"),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            style: TextButton.styleFrom(foregroundColor: Colors.red),
+            child: const Text("Delete all"),
+          ),
+        ],
+      ),
+    );
+    if (confirm != true || !mounted) return;
+    final toDelete = List<SavedLog>.of(_logs);
+    for (final log in toDelete) {
+      await _deleteLogFile(log);
+    }
+    setState(() {
+      _logs.clear();
+      _speedCache.clear();
+      _selectedLog = null;
+      _logSeq = 0; // empty -> next capture restarts at 1
+      _prefs?.setInt(_kLogSeqKey, 0);
+    });
+  }
+
+  // Make `base` unique among the other logs' names. If it collides, append
+  // " (1)", " (2)", … starting from the first duplicate.
+  String _uniqueName(String base, {required int excludeId}) {
+    final taken = _logs
+        .where((l) => l.id != excludeId)
+        .map((l) => l.name)
+        .toSet();
+    if (!taken.contains(base)) return base;
+    int k = 1;
+    while (taken.contains("$base ($k)")) {
+      k++;
+    }
+    return "$base ($k)";
+  }
+
+  Future<void> _renameLog(SavedLog log) async {
+    final result = await showDialog<String>(
+      context: context,
+      builder: (ctx) => _RenameDialog(initial: log.name, hint: "Log #${log.id}"),
+    );
+    if (result == null || !mounted) return; // cancelled / navigated away
+    final desired = result.trim();
+    final newName = desired.isEmpty
+        ? "" // cleared → falls back to "Log #id"
+        : _uniqueName(desired, excludeId: log.id);
+    setState(() => log.name = newName);
+    _persistLog(log); // rewrite the file with the new name
   }
 
   String _csvFor(SavedLog log) {
@@ -519,19 +903,68 @@ class _BLETestScreenState extends State<BLETestScreen>
     return sb.toString();
   }
 
+  // Filesystem-safe base name for a log's export file (from its display name).
+  String _safeName(SavedLog log) {
+    final base = log.displayName
+        .replaceAll(RegExp(r'[^A-Za-z0-9 _-]'), '_')
+        .trim();
+    return base.isEmpty ? 'log_${log.id}' : base;
+  }
+
   // Export via the system share sheet (handles any size, unlike the clipboard).
   void _exportLog(SavedLog log) async {
     try {
       final dir = await getTemporaryDirectory();
-      final file = File('${dir.path}/paddle_log_${log.id}.csv');
+      final file = File('${dir.path}/${_safeName(log)}.csv');
       await file.writeAsString(_csvFor(log));
       await SharePlus.instance.share(
         ShareParams(
           files: [XFile(file.path, mimeType: 'text/csv')],
-          subject: 'Paddle log #${log.id}',
+          subject: 'Paddle log: ${log.displayName}',
           text:
-              'Paddle IMU log #${log.id}: ${log.count} samples, '
+              '${log.displayName}: ${log.count} samples, '
               '${log.durationSec.toStringAsFixed(1)} s',
+        ),
+      );
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text("Export failed: $e")));
+      }
+    }
+  }
+
+  // Bundle every log's CSV into a single .zip ("folder") and share that, so all
+  // logs can be exported at once instead of one file at a time.
+  void _exportAllLogs() async {
+    if (_logs.isEmpty) {
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text("No logs to share")));
+      return;
+    }
+    try {
+      final archive = Archive();
+      final used = <String>{};
+      for (final log in _logs) {
+        // Entry name from the log's (unique) display name; guard against any
+        // collision after sanitizing by appending the id.
+        var name = '${_safeName(log)}.csv';
+        if (!used.add(name)) name = '${_safeName(log)}_${log.id}.csv';
+        used.add(name);
+        final bytes = utf8.encode(_csvFor(log));
+        archive.addFile(ArchiveFile.bytes(name, bytes));
+      }
+      final zipped = ZipEncoder().encode(archive);
+      final dir = await getTemporaryDirectory();
+      final file = File('${dir.path}/paddle_logs.zip');
+      await file.writeAsBytes(zipped, flush: true);
+      await SharePlus.instance.share(
+        ShareParams(
+          files: [XFile(file.path, mimeType: 'application/zip')],
+          subject: 'Paddle logs (${_logs.length})',
+          text: 'All ${_logs.length} paddle IMU logs (one CSV each).',
         ),
       );
     } catch (e) {
@@ -679,34 +1112,85 @@ class _BLETestScreenState extends State<BLETestScreen>
             ),
           ),
           const SizedBox(height: 16),
+          _loggingControl(streaming),
+        ],
+      ),
+    );
+  }
+
+  // The logging control switches with the "Automatic logging" setting: an
+  // Arm/Disarm toggle for motion-triggered capture, or a manual Start/Stop.
+  Widget _loggingControl(bool streaming) {
+    if (_autoLoggingEnabled) {
+      return Column(
+        children: [
           ElevatedButton.icon(
-            // Only allow logging while actually streaming from the paddle.
-            onPressed: streaming
-                ? (_isLogging ? _stopLogging : _startLogging)
-                : null,
+            // Arm it, then any swing that crosses the accel threshold is
+            // recorded automatically. Only meaningful while streaming.
+            onPressed: streaming ? _toggleArmed : null,
             style: ElevatedButton.styleFrom(
-              backgroundColor: _isLogging ? Colors.red : Colors.green,
+              backgroundColor: _armed ? Colors.red : Colors.green,
               foregroundColor: Colors.white,
               padding: const EdgeInsets.symmetric(horizontal: 30, vertical: 14),
             ),
-            icon: Icon(_isLogging ? Icons.stop : Icons.fiber_manual_record),
+            icon: Icon(
+              _armed ? Icons.motion_photos_off : Icons.motion_photos_on,
+            ),
             label: Text(
-              _isLogging ? "Stop Logging" : "Start Logging",
+              _armed ? "Disarm Auto-Capture" : "Arm Auto-Capture",
               style: const TextStyle(fontSize: 16),
             ),
           ),
           const SizedBox(height: 8),
           Text(
-            _isLogging
-                ? "Logging... $_capCount samples "
-                      "(auto-stops at ${_autoTimeoutSec.toStringAsFixed(1)} s)"
+            _recording
+                ? "● Recording swing… $_capCount samples"
+                : _armed
+                ? "Armed — waiting for motion "
+                      "(|a| ≥ ${_accelTriggerG.toStringAsFixed(1)} g)"
                 : (_logs.isNotEmpty
-                      ? "${_logs.length} log(s) saved - see Logs tab"
-                      : "Not logging"),
-            style: const TextStyle(fontSize: 13, color: Colors.grey),
+                      ? "${_logs.length} log(s) saved — see Logs tab"
+                      : "Disarmed"),
+            style: TextStyle(
+              fontSize: 13,
+              color: _recording ? Colors.red : Colors.grey,
+            ),
           ),
         ],
-      ),
+      );
+    }
+    // Manual mode: Start/Stop button (auto-stops after the timeout).
+    return Column(
+      children: [
+        ElevatedButton.icon(
+          onPressed: streaming
+              ? (_isManualLogging ? _stopLogging : _startLogging)
+              : null,
+          style: ElevatedButton.styleFrom(
+            backgroundColor: _isManualLogging ? Colors.red : Colors.green,
+            foregroundColor: Colors.white,
+            padding: const EdgeInsets.symmetric(horizontal: 30, vertical: 14),
+          ),
+          icon: Icon(_isManualLogging ? Icons.stop : Icons.fiber_manual_record),
+          label: Text(
+            _isManualLogging ? "Stop Logging" : "Start Logging",
+            style: const TextStyle(fontSize: 16),
+          ),
+        ),
+        const SizedBox(height: 8),
+        Text(
+          _isManualLogging
+              ? "Logging… $_capCount samples "
+                    "(auto-stops at ${_manualTimeoutSec.toStringAsFixed(1)} s)"
+              : (_logs.isNotEmpty
+                    ? "${_logs.length} log(s) saved — see Logs tab"
+                    : "Not logging"),
+          style: TextStyle(
+            fontSize: 13,
+            color: _isManualLogging ? Colors.red : Colors.grey,
+          ),
+        ),
+      ],
     );
   }
 
@@ -715,14 +1199,50 @@ class _BLETestScreenState extends State<BLETestScreen>
     if (_selectedLog != null) return _buildLogDetail(_selectedLog!);
 
     if (_logs.isEmpty) {
-      return const Center(
+      return Center(
         child: Text(
-          "No logs yet.\nConnect, then tap Start Logging.",
+          _autoLoggingEnabled
+              ? "No logs yet.\nConnect, then Arm Auto-Capture and swing."
+              : "No logs yet.\nConnect, then tap Start Logging.",
           textAlign: TextAlign.center,
-          style: TextStyle(color: Colors.grey),
+          style: const TextStyle(color: Colors.grey),
         ),
       );
     }
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Padding(
+          padding: const EdgeInsets.fromLTRB(12, 8, 8, 4),
+          child: Row(
+            children: [
+              Expanded(
+                child: Text(
+                  "${_logs.length} log(s)",
+                  style: const TextStyle(fontWeight: FontWeight.bold),
+                ),
+              ),
+              TextButton.icon(
+                onPressed: _exportAllLogs,
+                icon: const Icon(Icons.folder_zip),
+                label: const Text("Share all"),
+              ),
+              TextButton.icon(
+                onPressed: _deleteAllLogs,
+                icon: const Icon(Icons.delete_sweep),
+                label: const Text("Delete all"),
+                style: TextButton.styleFrom(foregroundColor: Colors.red),
+              ),
+            ],
+          ),
+        ),
+        const Divider(height: 1),
+        Expanded(child: _buildLogsList()),
+      ],
+    );
+  }
+
+  Widget _buildLogsList() {
     return ListView.separated(
       itemCount: _logs.length,
       separatorBuilder: (_, _) => const Divider(height: 1),
@@ -730,28 +1250,53 @@ class _BLETestScreenState extends State<BLETestScreen>
         final log = _logs[i];
         return ListTile(
           leading: const Icon(Icons.show_chart, color: Colors.blueAccent),
-          title: Text("Log #${log.id}  •  ${_fmtTime(log.timestamp)}"),
+          title: Text(log.displayName),
           subtitle: Text(
-            "${log.count} samples  •  ${log.durationSec.toStringAsFixed(1)} s",
+            "#${log.id}  •  ${_fmtTime(log.timestamp)}  •  ${log.count} samples"
+            "  •  ${log.durationSec.toStringAsFixed(1)} s",
           ),
-          trailing: Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              IconButton(
-                tooltip: "Export CSV",
-                icon: const Icon(Icons.share),
-                onPressed: () => _exportLog(log),
-              ),
-              IconButton(
-                tooltip: "Delete",
-                icon: const Icon(Icons.delete_outline),
-                onPressed: () => _deleteLog(log),
-              ),
-            ],
-          ),
+          trailing: _logActionsMenu(log),
           onTap: () => setState(() => _selectedLog = log),
         );
       },
+    );
+  }
+
+  // Per-log overflow menu: rename / export / delete.
+  Widget _logActionsMenu(SavedLog log) {
+    return PopupMenuButton<String>(
+      tooltip: "Actions",
+      onSelected: (v) {
+        if (v == 'rename') _renameLog(log);
+        if (v == 'export') _exportLog(log);
+        if (v == 'delete') _deleteLog(log);
+      },
+      itemBuilder: (_) => const [
+        PopupMenuItem(
+          value: 'rename',
+          child: ListTile(
+            dense: true,
+            leading: Icon(Icons.edit_outlined),
+            title: Text("Rename"),
+          ),
+        ),
+        PopupMenuItem(
+          value: 'export',
+          child: ListTile(
+            dense: true,
+            leading: Icon(Icons.share),
+            title: Text("Export CSV"),
+          ),
+        ),
+        PopupMenuItem(
+          value: 'delete',
+          child: ListTile(
+            dense: true,
+            leading: Icon(Icons.delete_outline),
+            title: Text("Delete"),
+          ),
+        ),
+      ],
     );
   }
 
@@ -776,22 +1321,17 @@ class _BLETestScreenState extends State<BLETestScreen>
                 onPressed: () => setState(() => _selectedLog = null),
               ),
               Expanded(
-                child: Text(
-                  "Log #${log.id}  •  ${log.count} samples  •  "
-                  "${log.durationSec.toStringAsFixed(1)} s",
-                  style: const TextStyle(fontWeight: FontWeight.bold),
+                // Tap the title to rename.
+                child: InkWell(
+                  onTap: () => _renameLog(log),
+                  child: Text(
+                    "${log.displayName}  •  ${log.count} samples  •  "
+                    "${log.durationSec.toStringAsFixed(1)} s",
+                    style: const TextStyle(fontWeight: FontWeight.bold),
+                  ),
                 ),
               ),
-              IconButton(
-                tooltip: "Export CSV",
-                icon: const Icon(Icons.share),
-                onPressed: () => _exportLog(log),
-              ),
-              IconButton(
-                tooltip: "Delete",
-                icon: const Icon(Icons.delete_outline),
-                onPressed: () => _deleteLog(log),
-              ),
+              _logActionsMenu(log),
             ],
           ),
         ),
@@ -812,6 +1352,21 @@ class _BLETestScreenState extends State<BLETestScreen>
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
+        if (log.hitTimes.isNotEmpty)
+          Padding(
+            padding: const EdgeInsets.fromLTRB(12, 6, 12, 0),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Container(width: 14, height: 3, color: const Color(0xFFE91E63)),
+                const SizedBox(width: 6),
+                Text(
+                  "ball hit (${log.hitTimes.length})",
+                  style: const TextStyle(fontSize: 12, color: Color(0xFFE91E63)),
+                ),
+              ],
+            ),
+          ),
         _chartSection(
           "Speed (m/s)",
           log,
@@ -906,6 +1461,7 @@ class _BLETestScreenState extends State<BLETestScreen>
                 forcedMin: forcedMin,
                 cornerText: cornerText,
                 centerZero: centerZero,
+                hitTimes: log.hitTimes,
               ),
               child: const SizedBox.expand(),
             ),
@@ -942,50 +1498,184 @@ class _BLETestScreenState extends State<BLETestScreen>
     return ListView(
       padding: const EdgeInsets.all(20),
       children: [
-        const Text(
-          "Auto-stop logging",
-          style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+        SwitchListTile(
+          contentPadding: EdgeInsets.zero,
+          title: const Text(
+            "Automatic logging",
+            style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+          ),
+          subtitle: Text(
+            _autoLoggingEnabled
+                ? "Swings are auto-detected and recorded."
+                : "Off — use the Start Logging button on the Connection tab.",
+          ),
+          value: _autoLoggingEnabled,
+          onChanged: _setAutoLogging,
         ),
-        const SizedBox(height: 4),
-        const Text(
-          "Logging stops automatically after this duration.",
-          style: TextStyle(color: Colors.grey),
+        const Divider(height: 24),
+        ..._hitDetectionSettings(),
+        const Divider(height: 24),
+        if (_autoLoggingEnabled)
+          ..._autoCaptureSettings()
+        else
+          ..._manualLoggingSettings(),
+      ],
+    );
+  }
+
+  List<Widget> _hitDetectionSettings() {
+    return [
+      const Text(
+        "Hit detection",
+        style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+      ),
+      const SizedBox(height: 4),
+      const Text(
+        "Ball hits are found from the high-frequency vibration in the wood "
+        "(runs always). Lower threshold = more sensitive (catches weaker hits, "
+        "but risks false triggers on hard swings). Hits are marked on the log "
+        "graphs.",
+        style: TextStyle(color: Colors.grey),
+      ),
+      const SizedBox(height: 8),
+      _settingSlider(
+        label: "Hit threshold",
+        value: _hitThreshG,
+        min: 0.1,
+        max: 1.5,
+        divisions: 28, // 0.05 g steps
+        unit: "g",
+        decimals: 2,
+        onChanged: (v) => setState(() {
+          _hitThreshG = v;
+          _hitDetector.threshold = v;
+        }),
+        onChangeEnd: (v) => _prefs?.setDouble(_kHitThreshKey, v),
+      ),
+    ];
+  }
+
+  List<Widget> _autoCaptureSettings() {
+    return [
+      const Text(
+        "Auto-capture tuning",
+        style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+      ),
+      const SizedBox(height: 4),
+      const Text(
+        "A capture fires on the rising edge when the accelerometer magnitude "
+        "crosses the trigger. It records a fixed window: the pre-trigger "
+        "history before the crossing plus the post-trigger window after it "
+        "(set them equal to mirror). Each peak is one capture, so a single "
+        "stroke can produce two logs — the forward swing and the recovery.",
+        style: TextStyle(color: Colors.grey),
+      ),
+      const SizedBox(height: 8),
+      _settingSlider(
+        label: "Trigger threshold",
+        value: _accelTriggerG,
+        min: 1.0,
+        max: 8.0,
+        divisions: 70, // 0.1 g steps
+        unit: "g",
+        decimals: 1,
+        onChanged: (v) => setState(() => _accelTriggerG = v),
+        onChangeEnd: (v) => _prefs?.setDouble(_kTriggerGKey, v),
+      ),
+      _settingSlider(
+        label: "Pre-trigger window",
+        value: _preTriggerSec,
+        min: 0.1,
+        max: 1.5,
+        divisions: 28, // 0.05 s steps
+        unit: "s",
+        decimals: 2,
+        onChanged: (v) => setState(() => _preTriggerSec = v),
+        onChangeEnd: (v) => _prefs?.setDouble(_kPreTrigKey, v),
+      ),
+      _settingSlider(
+        label: "Post-trigger window",
+        value: _postTriggerSec,
+        min: 0.1,
+        max: 1.5,
+        divisions: 28, // 0.05 s steps
+        unit: "s",
+        decimals: 2,
+        onChanged: (v) => setState(() => _postTriggerSec = v),
+        onChangeEnd: (v) => _prefs?.setDouble(_kPostTrigKey, v),
+      ),
+    ];
+  }
+
+  List<Widget> _manualLoggingSettings() {
+    return [
+      const Text(
+        "Manual logging",
+        style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+      ),
+      const SizedBox(height: 4),
+      const Text(
+        "Recording starts and stops with the Start/Stop button on the "
+        "Connection tab, and stops automatically after this timeout.",
+        style: TextStyle(color: Colors.grey),
+      ),
+      const SizedBox(height: 8),
+      _settingSlider(
+        label: "Auto-stop timeout",
+        value: _manualTimeoutSec,
+        min: 0.1,
+        max: 5.0,
+        divisions: 49, // 0.1 s steps
+        unit: "s",
+        decimals: 1,
+        onChanged: (v) => setState(() => _manualTimeoutSec = v),
+        onChangeEnd: (v) => _prefs?.setDouble(_kManualTimeoutKey, v),
+      ),
+    ];
+  }
+
+  // A labelled slider with a live value readout and min/max end labels; steps
+  // are snapped to `decimals` places and persisted on release.
+  Widget _settingSlider({
+    required String label,
+    required double value,
+    required double min,
+    required double max,
+    required int divisions,
+    required String unit,
+    required int decimals,
+    required ValueChanged<double> onChanged,
+    required ValueChanged<double> onChangeEnd,
+  }) {
+    String fmt(double v) => "${v.toStringAsFixed(decimals)} $unit";
+    double snap(double v) => double.parse(v.toStringAsFixed(decimals));
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Padding(
+          padding: const EdgeInsets.only(top: 14),
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Text(label, style: const TextStyle(fontWeight: FontWeight.bold)),
+              Text(fmt(value), style: const TextStyle(fontWeight: FontWeight.bold)),
+            ],
+          ),
         ),
-        const SizedBox(height: 16),
+        Slider(
+          value: value,
+          min: min,
+          max: max,
+          divisions: divisions,
+          label: fmt(value),
+          onChanged: (v) => onChanged(snap(v)),
+          onChangeEnd: (v) => onChangeEnd(snap(v)),
+        ),
         Row(
-          children: [
-            const Text("Timeout"),
-            Expanded(
-              child: Slider(
-                value: _autoTimeoutSec,
-                min: 1.0,
-                max: 5.0,
-                divisions: 40, // 0.1 s steps
-                label: "${_autoTimeoutSec.toStringAsFixed(1)} s",
-                onChanged: (v) => setState(
-                  () => _autoTimeoutSec = double.parse(v.toStringAsFixed(1)),
-                ),
-                onChangeEnd: (v) => _prefs?.setDouble(
-                  _kAutoTimeoutKey,
-                  double.parse(v.toStringAsFixed(1)),
-                ),
-              ),
-            ),
-            SizedBox(
-              width: 52,
-              child: Text(
-                "${_autoTimeoutSec.toStringAsFixed(1)} s",
-                textAlign: TextAlign.right,
-                style: const TextStyle(fontWeight: FontWeight.bold),
-              ),
-            ),
-          ],
-        ),
-        const Row(
           mainAxisAlignment: MainAxisAlignment.spaceBetween,
           children: [
-            Text("1.0 s", style: TextStyle(color: Colors.grey, fontSize: 12)),
-            Text("5.0 s", style: TextStyle(color: Colors.grey, fontSize: 12)),
+            Text(fmt(min), style: const TextStyle(color: Colors.grey, fontSize: 12)),
+            Text(fmt(max), style: const TextStyle(color: Colors.grey, fontSize: 12)),
           ],
         ),
       ],
@@ -1003,6 +1693,7 @@ class _ChartPainter extends CustomPainter {
   final double? forcedMin; // if set, pin the y-axis bottom here (no auto-scale)
   final String? cornerText; // optional label drawn in the top-right corner
   final bool centerZero; // if true, y-axis is symmetric about 0 (0 centered)
+  final List<double> hitTimes; // detected ball-hit times (s) -> vertical lines
 
   _ChartPainter(
     this.t,
@@ -1012,6 +1703,7 @@ class _ChartPainter extends CustomPainter {
     this.forcedMin,
     this.cornerText,
     this.centerZero = false,
+    this.hitTimes = const [],
   });
 
   @override
@@ -1146,6 +1838,19 @@ class _ChartPainter extends CustomPainter {
       canvas.drawPath(path, paint);
     }
 
+    // Ball-hit markers: a clear vertical line at each detected hit time.
+    if (hitTimes.isNotEmpty) {
+      final hitPaint = Paint()
+        ..color = const Color(0xFFE91E63) // magenta — distinct from all traces
+        ..strokeWidth = 2.0
+        ..isAntiAlias = true;
+      for (final ht in hitTimes) {
+        if (ht < tMin || ht > tMax) continue;
+        final x = xOf(ht);
+        canvas.drawLine(Offset(x, plot.top), Offset(x, plot.bottom), hitPaint);
+      }
+    }
+
     // Optional corner label (e.g. max speed), top-right inside the plot.
     if (cornerText != null) {
       final tp = TextPainter(
@@ -1178,6 +1883,61 @@ class _ChartPainter extends CustomPainter {
       old.colors != colors ||
       old.forcedMin != forcedMin ||
       old.cornerText != cornerText ||
-      old.centerZero != centerZero;
+      old.centerZero != centerZero ||
+      old.hitTimes != hitTimes;
+}
+
+/// Rename dialog that owns its text controller, so the controller is disposed
+/// only when the dialog's element is (after the dismiss animation finishes) —
+/// disposing it in the caller's async gap would crash the still-animating
+/// TextField ("controller used after being disposed").
+class _RenameDialog extends StatefulWidget {
+  final String initial;
+  final String hint;
+  const _RenameDialog({required this.initial, required this.hint});
+
+  @override
+  State<_RenameDialog> createState() => _RenameDialogState();
+}
+
+class _RenameDialogState extends State<_RenameDialog> {
+  late final TextEditingController _controller = TextEditingController(
+    text: widget.initial,
+  );
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: const Text("Rename log"),
+      content: TextField(
+        controller: _controller,
+        autofocus: true,
+        textInputAction: TextInputAction.done,
+        decoration: InputDecoration(
+          // Show the default "Log #id" faded in the field until a name is typed.
+          hintText: widget.hint,
+          hintStyle: TextStyle(color: Colors.grey.shade400),
+          labelText: "Name (blank to clear)",
+        ),
+        onSubmitted: (v) => Navigator.pop(context, v),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(context),
+          child: const Text("Cancel"),
+        ),
+        TextButton(
+          onPressed: () => Navigator.pop(context, _controller.text),
+          child: const Text("Save"),
+        ),
+      ],
+    );
+  }
 }
 
