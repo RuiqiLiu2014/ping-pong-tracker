@@ -23,9 +23,16 @@ const uint8_t UART_SERVICE_UUID[16] = {
 const uint8_t UART_TX_UUID[16] = {
   0x9E, 0xCA, 0xDC, 0x24, 0x0E, 0xE5, 0xA9, 0xE0,
   0x93, 0xF3, 0xA3, 0xB5, 0x03, 0x00, 0x40, 0x6E};
+// Firmware version string, exposed as a READ characteristic (UUID ...0004...)
+// so the app can show it on connect. Bump on firmware changes (1.0, 1.1, ...).
+#define FW_VERSION "1.0"
+const uint8_t UART_VER_UUID[16] = {
+  0x9E, 0xCA, 0xDC, 0x24, 0x0E, 0xE5, 0xA9, 0xE0,
+  0x93, 0xF3, 0xA3, 0xB5, 0x04, 0x00, 0x40, 0x6E};
 
 BLEService        uartService(UART_SERVICE_UUID);
 BLECharacteristic txChar(UART_TX_UUID);
+BLECharacteristic verChar(UART_VER_UUID);
 
 // =====================================================
 // Batched notification buffer
@@ -104,6 +111,13 @@ void setup() {
   txChar.setPermission(SECMODE_OPEN, SECMODE_NO_ACCESS);
   txChar.setMaxLen(sizeof(txbuf));
   txChar.begin();
+
+  // Firmware version, read once by the app on connect.
+  verChar.setProperties(CHR_PROPS_READ);
+  verChar.setPermission(SECMODE_OPEN, SECMODE_NO_ACCESS);
+  verChar.setMaxLen(8);
+  verChar.begin();
+  verChar.write(FW_VERSION, sizeof(FW_VERSION) - 1);
 
   Bluefruit.Advertising.addFlags(BLE_GAP_ADV_FLAGS_LE_ONLY_GENERAL_DISC_MODE);
   Bluefruit.Advertising.addTxPower();

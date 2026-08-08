@@ -12,6 +12,9 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'motion_estimator.dart';
 import 'hit_detector.dart';
 
+// App version, shown top-right. Bump on app changes (1.0, 1.1, ...).
+const String kAppVersion = "1.0";
+
 void main() {
   FlutterBluePlus.setLogLevel(LogLevel.info, color: true);
   runApp(const PingPongTrackerApp());
@@ -80,6 +83,12 @@ class _BLETestScreenState extends State<BLETestScreen>
   final Guid txCharacteristicUuid = Guid(
     "6E400003-B5A3-F393-E0A9-E50E24DCCA9E",
   );
+  // Firmware version characteristic (read once on connect).
+  final Guid versionCharacteristicUuid = Guid(
+    "6E400004-B5A3-F393-E0A9-E50E24DCCA9E",
+  );
+  // Firmware version reported by the board; "?" until read on connect.
+  String _firmwareVersion = "?";
 
   // ---- Live display ----
   List<String> _imuData = ["0.00", "0.00", "0.00", "0.00", "0.00", "0.00"];
@@ -444,11 +453,21 @@ class _BLETestScreenState extends State<BLETestScreen>
 
       for (BluetoothService service in services) {
         if (service.uuid == uartServiceUuid) {
+          BluetoothCharacteristic? tx;
           for (BluetoothCharacteristic char in service.characteristics) {
-            if (char.uuid == txCharacteristicUuid) {
-              _subscribeToCharacteristic(char);
-              return;
+            if (char.uuid == txCharacteristicUuid) tx = char;
+            if (char.uuid == versionCharacteristicUuid) {
+              try {
+                final v = await char.read();
+                if (v.isNotEmpty) _firmwareVersion = utf8.decode(v).trim();
+              } catch (_) {
+                // older firmware without the version characteristic
+              }
             }
+          }
+          if (tx != null) {
+            _subscribeToCharacteristic(tx);
+            return;
           }
         }
       }
@@ -581,6 +600,7 @@ class _BLETestScreenState extends State<BLETestScreen>
       _samplesInWindow = 0;
       _sampleRateStr = "0";
       _batteryPct = "--";
+      _firmwareVersion = "?";
       _imuData = ["0.00", "0.00", "0.00", "0.00", "0.00", "0.00"];
       _armed = false;
       _recording = false;
@@ -995,18 +1015,19 @@ class _BLETestScreenState extends State<BLETestScreen>
           Center(
             child: Padding(
               padding: const EdgeInsets.only(right: 14),
-              child: Row(
+              child: Column(
                 mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.end,
                 children: [
-                  const Icon(Icons.battery_full, size: 20),
-                  const SizedBox(width: 4),
                   Text(
-                    "$_batteryPct%",
-                    style: const TextStyle(
-                      fontSize: 15,
-                      fontWeight: FontWeight.bold,
-                    ),
+                    "app v$kAppVersion",
+                    style: const TextStyle(fontSize: 11),
                   ),
+                  if (_connectionStatus == "Streaming Data")
+                    Text(
+                      "fw v$_firmwareVersion",
+                      style: const TextStyle(fontSize: 11),
+                    ),
                 ],
               ),
             ),
@@ -1027,6 +1048,55 @@ class _BLETestScreenState extends State<BLETestScreen>
         controller: _tabController,
         children: [_buildConnectionTab(), _buildLogsTab(), _buildSettingsTab()],
       ),
+    );
+  }
+
+  // Horizontal rectangular battery gauge with the percentage beside it.
+  Widget _batteryIndicator(int pct) {
+    final p = pct.clamp(0, 100);
+    final Color fill = p <= 20
+        ? Colors.red
+        : (p <= 50 ? Colors.orange : Colors.green);
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Container(
+          width: 46,
+          height: 20,
+          padding: const EdgeInsets.all(2),
+          decoration: BoxDecoration(
+            border: Border.all(color: Colors.black54, width: 1.5),
+            borderRadius: BorderRadius.circular(4),
+          ),
+          child: FractionallySizedBox(
+            alignment: Alignment.centerLeft,
+            widthFactor: p / 100.0,
+            child: Container(
+              decoration: BoxDecoration(
+                color: fill,
+                borderRadius: BorderRadius.circular(1.5),
+              ),
+            ),
+          ),
+        ),
+        // terminal nub
+        Container(
+          width: 3,
+          height: 8,
+          decoration: const BoxDecoration(
+            color: Colors.black54,
+            borderRadius: BorderRadius.only(
+              topRight: Radius.circular(2),
+              bottomRight: Radius.circular(2),
+            ),
+          ),
+        ),
+        const SizedBox(width: 8),
+        Text(
+          "$p%",
+          style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+        ),
+      ],
     );
   }
 
@@ -1055,6 +1125,10 @@ class _BLETestScreenState extends State<BLETestScreen>
             "Sample Rate: $_sampleRateStr Hz",
             style: const TextStyle(fontSize: 16, color: Colors.grey),
           ),
+          if (streaming) ...[
+            const SizedBox(height: 10),
+            _batteryIndicator(int.tryParse(_batteryPct) ?? 0),
+          ],
           const SizedBox(height: 28),
           const Text(
             "Accelerometer (G)",
