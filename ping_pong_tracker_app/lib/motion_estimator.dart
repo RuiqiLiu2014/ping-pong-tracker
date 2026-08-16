@@ -28,6 +28,18 @@ class MotionEstimator {
   static const int _restNeeded = 160; // ~0.1 s sustained before ZUPT
   static const double _velDecay = 0.9999; // gentle leak (~6 s) to bound drift
 
+  // ---- Paddle-face speed from rigid-body rotation:  v = omega x r ----
+  // r is the fixed board-frame vector from the sensor to the paddle-face
+  // contact point. Because omega (gyro) is a direct measurement and r is
+  // constant, this speed has NO integration and therefore NO drift. Direction
+  // encodes the mounting (which board axis points handle->tip); magnitude
+  // (lever arm, m) is tunable from Settings.
+  // Handle axis = board Z (confirmed by a pure handle-twist capture: gz
+  // dominated). r points sensor->tip along the handle, so omega x r excludes
+  // the twist/spin component and keeps the swing.
+  static const List<double> _rDir = [0.0, 0.0, 1.0]; // board +Z -> paddle tip
+  double leverArmM = 0.12; // sensor -> face-center distance (m)
+
   bool calibrating = false;
   bool calibrated = false;
 
@@ -43,6 +55,7 @@ class MotionEstimator {
 
   // Outputs for display
   double roll = 0, pitch = 0, tilt = 0, speed = 0;
+  double faceSpeed = 0; // |omega x r|, drift-free paddle-face speed (m/s)
 
   double get calProgress => calibrating
       ? (_calN / _calTarget).clamp(0.0, 1.0)
@@ -58,7 +71,23 @@ class MotionEstimator {
     _bias[0] = _bias[1] = _bias[2] = 0;
     _vel[0] = _vel[1] = _vel[2] = 0;
     _restCount = 0;
-    roll = pitch = tilt = speed = 0;
+    roll = pitch = tilt = speed = faceSpeed = 0;
+  }
+
+  /// Drift-free paddle-face speed |omega x r| (m/s) from bias-corrected gyro.
+  /// Independent of orientation/integration, so it's valid even uncalibrated
+  /// (bias is 0 then) and always returns to 0 at rest.
+  double _faceSpeed(double gx, double gy, double gz) {
+    final double wx = (gx - _bias[0]) * _deg2rad;
+    final double wy = (gy - _bias[1]) * _deg2rad;
+    final double wz = (gz - _bias[2]) * _deg2rad;
+    final double rx = leverArmM * _rDir[0];
+    final double ry = leverArmM * _rDir[1];
+    final double rz = leverArmM * _rDir[2];
+    final double vx = wy * rz - wz * ry;
+    final double vy = wz * rx - wx * rz;
+    final double vz = wx * ry - wy * rx;
+    return math.sqrt(vx * vx + vy * vy + vz * vz);
   }
 
   void startCalibration() {
@@ -71,6 +100,7 @@ class MotionEstimator {
 
   /// ax,ay,az in g; gx,gy,gz in deg/s. Call once per IMU sample.
   void update(double ax, double ay, double az, double gx, double gy, double gz) {
+    faceSpeed = _faceSpeed(gx, gy, gz); // drift-free; valid regardless of state
     if (calibrating) {
       _sgx += gx;
       _sgy += gy;
@@ -232,19 +262,36 @@ class MotionEstimator {
 
 /// Result of replaying a recorded log through the estimator.
 class SpeedSeries {
-  final Float32List speed; // |velocity| per sample, m/s
+  final Float32List speed; // accel-integrated |velocity| per sample, m/s (drifts)
   final double maxSpeed;
-  const SpeedSeries(this.speed, this.maxSpeed);
+  final Float32List faceSpeed; // |omega x r| per sample, m/s (drift-free)
+  final double maxFaceSpeed;
+  const SpeedSeries(
+    this.speed,
+    this.maxSpeed,
+    this.faceSpeed,
+    this.maxFaceSpeed,
+  );
 }
 
 /// Recompute the velocity magnitude over a recorded log from its raw IMU data.
 /// `axes` = [ax, ay, az, gx, gy, gz] (g and deg/s). Assumes the log begins with
 /// the board roughly at rest (a short initial window seeds bias + gravity).
-SpeedSeries computeSpeedSeries(List<Float32List> axes, int count) {
+/// Returns both the accel-integrated speed (drifts) and the omega x r face
+/// speed (drift-free); `leverArmM` scales the latter.
+SpeedSeries computeSpeedSeries(
+  List<Float32List> axes,
+  int count, {
+  double leverArmM = 0.12,
+}) {
   final speed = Float32List(count);
-  if (count == 0 || axes.length < 6) return SpeedSeries(speed, 0);
+  final faceSpeed = Float32List(count);
+  if (count == 0 || axes.length < 6) {
+    return SpeedSeries(speed, 0, faceSpeed, 0);
+  }
 
   final m = MotionEstimator();
+  m.leverArmM = leverArmM;
   // Seed calibration from a short resting window at the start of the log.
   final int k = math.min(415, math.max(1, count ~/ 4)); // ~0.25 s at 1660 Hz
   double sax = 0, say = 0, saz = 0, sgx = 0, sgy = 0, sgz = 0;
@@ -266,7 +313,7 @@ SpeedSeries computeSpeedSeries(List<Float32List> axes, int count) {
     sgz * inv,
   );
 
-  double maxS = 0;
+  double maxS = 0, maxF = 0;
   for (int i = 0; i < count; i++) {
     m.update(
       axes[0][i],
@@ -277,7 +324,9 @@ SpeedSeries computeSpeedSeries(List<Float32List> axes, int count) {
       axes[5][i],
     );
     speed[i] = m.speed;
+    faceSpeed[i] = m.faceSpeed;
     if (m.speed > maxS) maxS = m.speed;
+    if (m.faceSpeed > maxF) maxF = m.faceSpeed;
   }
-  return SpeedSeries(speed, maxS);
+  return SpeedSeries(speed, maxS, faceSpeed, maxF);
 }

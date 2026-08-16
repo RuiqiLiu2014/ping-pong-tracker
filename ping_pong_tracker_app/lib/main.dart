@@ -13,7 +13,7 @@ import 'motion_estimator.dart';
 import 'hit_detector.dart';
 
 // App version, shown top-right. Bump on app changes (1.0, 1.1, ...).
-const String kAppVersion = "1.0";
+const String kAppVersion = "1.1";
 
 void main() {
   FlutterBluePlus.setLogLevel(LogLevel.info, color: true);
@@ -166,13 +166,17 @@ class _BLETestScreenState extends State<BLETestScreen>
   static const String _kPostTrigKey = "postTriggerSec";
   static const String _kManualTimeoutKey = "manualTimeoutSec";
   static const String _kHitThreshKey = "hitThreshG";
+  static const String _kLeverArmKey = "leverArmCm";
+  static const String _kResetLogsKey = "resetLogsOnLeave";
   static const String _kLogSeqKey = "logSeq"; // last issued log number
   bool _autoLoggingEnabled = true; // false => manual Start/Stop button
+  bool _resetLogsOnLeave = true; // leaving Logs tab returns to the list
   double _accelTriggerG = 3.0; // |a| threshold to start a capture (g)
   double _preTriggerSec = 0.5; // window recorded before the trigger
   double _postTriggerSec = 0.5; // window recorded after the trigger (mirror)
   double _manualTimeoutSec = 4.0; // manual logging auto-stop (0.1 - 5.0 s)
   double _hitThreshG = 0.5; // ball-hit vibration threshold (lower = sensitive)
+  double _leverArmCm = 12.0; // sensor -> paddle-face distance for omega x r
   SharedPreferences? _prefs;
 
   // Accelerometer and gyroscope are drawn on separate, independently-scaled
@@ -197,6 +201,15 @@ class _BLETestScreenState extends State<BLETestScreen>
   void initState() {
     super.initState();
     _tabController = TabController(length: 3, vsync: this);
+    // When enabled, leaving the Logs tab (index 1) clears the open log, so
+    // returning shows the full list instead of the last-opened log.
+    _tabController.addListener(() {
+      if (_resetLogsOnLeave &&
+          _tabController.index != 1 &&
+          _selectedLog != null) {
+        setState(() => _selectedLog = null);
+      }
+    });
     // Repaint at ~10 Hz rather than on every BLE packet (~80 Hz).
     _uiTimer = Timer.periodic(const Duration(milliseconds: 100), (_) {
       if (mounted) setState(() {});
@@ -214,15 +227,20 @@ class _BLETestScreenState extends State<BLETestScreen>
     final post = prefs.getDouble(_kPostTrigKey);
     final timeout = prefs.getDouble(_kManualTimeoutKey);
     final hitThr = prefs.getDouble(_kHitThreshKey);
+    final lever = prefs.getDouble(_kLeverArmKey);
+    final resetLogs = prefs.getBool(_kResetLogsKey);
     if (!mounted) return;
     setState(() {
       if (autoLog != null) _autoLoggingEnabled = autoLog;
+      if (resetLogs != null) _resetLogsOnLeave = resetLogs;
       if (tg != null) _accelTriggerG = tg.clamp(1.0, 8.0);
       if (pre != null) _preTriggerSec = pre.clamp(0.1, 1.5);
       if (post != null) _postTriggerSec = post.clamp(0.1, 1.5);
       if (timeout != null) _manualTimeoutSec = timeout.clamp(0.1, 5.0);
       if (hitThr != null) _hitThreshG = hitThr.clamp(0.1, 1.5);
+      if (lever != null) _leverArmCm = lever.clamp(2.0, 30.0);
       _hitDetector.threshold = _hitThreshG;
+      _motion.leverArmM = _leverArmCm / 100.0;
     });
   }
 
@@ -1159,9 +1177,12 @@ class _BLETestScreenState extends State<BLETestScreen>
               style: const TextStyle(fontSize: 16, color: Colors.grey),
             ),
           const SizedBox(height: 16),
-          const Text("Velocity", style: TextStyle(fontWeight: FontWeight.bold)),
+          const Text(
+            "Face speed (ω×r)",
+            style: TextStyle(fontWeight: FontWeight.bold),
+          ),
           Text(
-            m.calibrated ? "Speed: ${m.speed.toStringAsFixed(2)} m/s" : "—",
+            streaming ? "${m.faceSpeed.toStringAsFixed(2)} m/s" : "—",
             style: const TextStyle(fontSize: 20),
           ),
           const SizedBox(height: 14),
@@ -1377,7 +1398,11 @@ class _BLETestScreenState extends State<BLETestScreen>
   Widget _buildLogDetail(SavedLog log) {
     final ss = _speedCache.putIfAbsent(
       log.id,
-      () => computeSpeedSeries(log.axes, log.count),
+      () => computeSpeedSeries(
+        log.axes,
+        log.count,
+        leverArmM: _leverArmCm / 100.0,
+      ),
     );
     // Fixed back/title/actions bar, then one lazy list holding the charts
     // (velocity on top) followed by the CSV rows, so everything scrolls
@@ -1444,11 +1469,13 @@ class _BLETestScreenState extends State<BLETestScreen>
         _chartSection(
           "Speed (m/s)",
           log,
-          [ss.speed],
-          const [Colors.indigo],
-          null,
+          [ss.faceSpeed, ss.speed],
+          const [Colors.indigo, Colors.grey],
+          const ["face ω×r", "accel (old)"],
           forcedMin: 0,
-          cornerText: "Max: ${ss.maxSpeed.toStringAsFixed(2)} m/s",
+          cornerText:
+              "face ${ss.maxFaceSpeed.toStringAsFixed(1)} · "
+              "old ${ss.maxSpeed.toStringAsFixed(1)} m/s",
         ),
         _chartSection(
           "Accelerometer (G)",
@@ -1589,12 +1616,65 @@ class _BLETestScreenState extends State<BLETestScreen>
         const Divider(height: 24),
         ..._hitDetectionSettings(),
         const Divider(height: 24),
+        ..._paddleSpeedSettings(),
+        const Divider(height: 24),
         if (_autoLoggingEnabled)
           ..._autoCaptureSettings()
         else
           ..._manualLoggingSettings(),
+        const Divider(height: 24),
+        SwitchListTile(
+          contentPadding: EdgeInsets.zero,
+          title: const Text(
+            "Always show logs list",
+            style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+          ),
+          subtitle: const Text(
+            "Returning to the Logs tab shows the full list instead of the "
+            "last-opened log.",
+          ),
+          value: _resetLogsOnLeave,
+          onChanged: (v) {
+            setState(() => _resetLogsOnLeave = v);
+            _prefs?.setBool(_kResetLogsKey, v);
+          },
+        ),
       ],
     );
+  }
+
+  List<Widget> _paddleSpeedSettings() {
+    return [
+      const Text(
+        "Paddle speed",
+        style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+      ),
+      const SizedBox(height: 4),
+      const Text(
+        "Face speed is computed drift-free as ω×r (gyro × lever arm). The lever "
+        "arm is the distance from the sensor to the paddle-face contact point; "
+        "it sets the m/s scale (timing is unaffected).",
+        style: TextStyle(color: Colors.grey),
+      ),
+      const SizedBox(height: 8),
+      _settingSlider(
+        label: "Lever arm",
+        value: _leverArmCm,
+        min: 2.0,
+        max: 30.0,
+        divisions: 56, // 0.5 cm steps
+        unit: "cm",
+        decimals: 1,
+        onChanged: (v) => setState(() {
+          _leverArmCm = v;
+          _motion.leverArmM = v / 100.0;
+        }),
+        onChangeEnd: (v) {
+          _prefs?.setDouble(_kLeverArmKey, v);
+          setState(() => _speedCache.clear()); // recompute logs at new scale
+        },
+      ),
+    ];
   }
 
   List<Widget> _hitDetectionSettings() {
