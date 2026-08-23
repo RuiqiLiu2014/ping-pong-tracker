@@ -113,7 +113,8 @@ class _BLETestScreenState extends State<BLETestScreen>
   String _sampleRateStr = "0";
 
   static const double _accelScaleG = 0.488 / 1000.0; // +/-16 g  -> G per count
-  static const double _gyroScaleDps = 70.0 / 1000.0; // 2000 dps -> dps per count
+  static const double _gyroScaleDps =
+      70.0 / 1000.0; // 2000 dps -> dps per count
   static const double _odrHz = 1660.0; // fixed IMU output data rate
 
   // ---- Auto-capture (motion-triggered logging) ----
@@ -210,7 +211,13 @@ class _BLETestScreenState extends State<BLETestScreen>
   static const List<int> _csvColWidth = [7, 9, 9, 9, 9, 9, 9];
   static const List<int> _csvColDecimals = [4, 4, 4, 4, 2, 2, 2];
   static const List<String> _csvColLabels = [
-    "time_s", "ax_g", "ay_g", "az_g", "gx_dps", "gy_dps", "gz_dps",
+    "time_s",
+    "ax_g",
+    "ay_g",
+    "az_g",
+    "gx_dps",
+    "gy_dps",
+    "gz_dps",
   ];
 
   late final TabController _tabController;
@@ -236,9 +243,12 @@ class _BLETestScreenState extends State<BLETestScreen>
     if (_resetLogsOnLeave &&
         _tabController.index != 1 &&
         _selectedLog != null) {
-      setState(() => _selectedLog = null);
+      _selectedLog = null;
     }
     _syncUiTimer();
+    // Rebuild so PopScope.canPop tracks the current tab (a swipe alone doesn't
+    // rebuild this widget).
+    if (mounted) setState(() {});
   }
 
   // Repaint at ~10 Hz (rather than on every ~80 Hz BLE packet) to refresh the
@@ -396,7 +406,16 @@ class _BLETestScreenState extends State<BLETestScreen>
           }
         }
         loaded.add(
-          SavedLog(id, ts, t, axes, n, t[n - 1], name: name, hitTimes: hitTimes),
+          SavedLog(
+            id,
+            ts,
+            t,
+            axes,
+            n,
+            t[n - 1],
+            name: name,
+            hitTimes: hitTimes,
+          ),
         );
         if (id > maxId) maxId = id;
       }
@@ -969,7 +988,8 @@ class _BLETestScreenState extends State<BLETestScreen>
   Future<void> _renameLog(SavedLog log) async {
     final result = await showDialog<String>(
       context: context,
-      builder: (ctx) => _RenameDialog(initial: log.name, hint: "Log #${log.id}"),
+      builder: (ctx) =>
+          _RenameDialog(initial: log.name, hint: "Log #${log.id}"),
     );
     if (result == null || !mounted) return; // cancelled / navigated away
     final desired = result.trim();
@@ -1076,47 +1096,64 @@ class _BLETestScreenState extends State<BLETestScreen>
   // =========================================================================
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(
-        title: const Text('Paddle Prototype Bench'),
-        backgroundColor: Colors.blueAccent,
-        foregroundColor: Colors.white,
-        actions: [
-          Center(
-            child: Padding(
-              padding: const EdgeInsets.only(right: 14),
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.end,
-                children: [
-                  Text(
-                    "app v$kAppVersion",
-                    style: const TextStyle(fontSize: 11),
-                  ),
-                  if (_connectionStatus == "Streaming Data")
+    return PopScope(
+      // Only let the system back button exit the app from the "root" — the
+      // Connection tab with no log open. Everything else navigates in-app.
+      canPop: _selectedLog == null && _tabController.index == 0,
+      onPopInvokedWithResult: (didPop, result) {
+        if (didPop) return;
+        if (_selectedLog != null) {
+          setState(() => _selectedLog = null); // log detail -> list
+        } else if (_tabController.index != 0) {
+          _tabController.animateTo(0); // other tab -> Connection tab
+        }
+      },
+      child: Scaffold(
+        appBar: AppBar(
+          title: const Text('Paddle Prototype Bench'),
+          backgroundColor: Colors.blueAccent,
+          foregroundColor: Colors.white,
+          actions: [
+            Center(
+              child: Padding(
+                padding: const EdgeInsets.only(right: 14),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.end,
+                  children: [
                     Text(
-                      "fw v$_firmwareVersion",
+                      "app v$kAppVersion",
                       style: const TextStyle(fontSize: 11),
                     ),
-                ],
+                    if (_connectionStatus == "Streaming Data")
+                      Text(
+                        "fw v$_firmwareVersion",
+                        style: const TextStyle(fontSize: 11),
+                      ),
+                  ],
+                ),
               ),
             ),
+          ],
+          bottom: TabBar(
+            controller: _tabController,
+            labelColor: Colors.white,
+            indicatorColor: Colors.white,
+            tabs: const [
+              Tab(icon: Icon(Icons.bluetooth), text: "Connection"),
+              Tab(icon: Icon(Icons.show_chart), text: "Logs"),
+              Tab(icon: Icon(Icons.settings), text: "Settings"),
+            ],
           ),
-        ],
-        bottom: TabBar(
+        ),
+        body: TabBarView(
           controller: _tabController,
-          labelColor: Colors.white,
-          indicatorColor: Colors.white,
-          tabs: const [
-            Tab(icon: Icon(Icons.bluetooth), text: "Connection"),
-            Tab(icon: Icon(Icons.show_chart), text: "Logs"),
-            Tab(icon: Icon(Icons.settings), text: "Settings"),
+          children: [
+            _buildConnectionTab(),
+            _buildLogsTab(),
+            _buildSettingsTab(),
           ],
         ),
-      ),
-      body: TabBarView(
-        controller: _tabController,
-        children: [_buildConnectionTab(), _buildLogsTab(), _buildSettingsTab()],
       ),
     );
   }
@@ -1242,7 +1279,9 @@ class _BLETestScreenState extends State<BLETestScreen>
             onPressed: (streaming && !m.calibrating) ? _calibrateMotion : null,
             icon: const Icon(Icons.explore),
             label: Text(
-              m.calibrated ? "Recalibrate (hold still)" : "Calibrate (hold still)",
+              m.calibrated
+                  ? "Recalibrate (hold still)"
+                  : "Calibrate (hold still)",
             ),
           ),
           const SizedBox(height: 28),
@@ -1534,7 +1573,10 @@ class _BLETestScreenState extends State<BLETestScreen>
               SizedBox(width: 6),
               Text(
                 "Jump to top",
-                style: TextStyle(color: Colors.white, fontWeight: FontWeight.w600),
+                style: TextStyle(
+                  color: Colors.white,
+                  fontWeight: FontWeight.w600,
+                ),
               ),
             ],
           ),
@@ -1637,7 +1679,10 @@ class _BLETestScreenState extends State<BLETestScreen>
                 const SizedBox(width: 6),
                 Text(
                   "ball hit (${log.hitTimes.length})",
-                  style: const TextStyle(fontSize: 12, color: Color(0xFFE91E63)),
+                  style: const TextStyle(
+                    fontSize: 12,
+                    color: Color(0xFFE91E63),
+                  ),
                 ),
               ],
             ),
@@ -2056,7 +2101,10 @@ class _BLETestScreenState extends State<BLETestScreen>
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
               Text(label, style: const TextStyle(fontWeight: FontWeight.bold)),
-              Text(fmt(value), style: const TextStyle(fontWeight: FontWeight.bold)),
+              Text(
+                fmt(value),
+                style: const TextStyle(fontWeight: FontWeight.bold),
+              ),
             ],
           ),
         ),
@@ -2072,8 +2120,14 @@ class _BLETestScreenState extends State<BLETestScreen>
         Row(
           mainAxisAlignment: MainAxisAlignment.spaceBetween,
           children: [
-            Text(fmt(min), style: const TextStyle(color: Colors.grey, fontSize: 12)),
-            Text(fmt(max), style: const TextStyle(color: Colors.grey, fontSize: 12)),
+            Text(
+              fmt(min),
+              style: const TextStyle(color: Colors.grey, fontSize: 12),
+            ),
+            Text(
+              fmt(max),
+              style: const TextStyle(color: Colors.grey, fontSize: 12),
+            ),
           ],
         ),
       ],
@@ -2256,7 +2310,8 @@ class _ChartPainter extends CustomPainter {
     // Ball-hit markers: a clear vertical line at each detected hit time.
     if (hitTimes.isNotEmpty) {
       final hitPaint = Paint()
-        ..color = const Color(0xFFE91E63) // magenta — distinct from all traces
+        ..color =
+            const Color(0xFFE91E63) // magenta — distinct from all traces
         ..strokeWidth = 2.0
         ..isAntiAlias = true;
       for (final ht in hitTimes) {
@@ -2310,7 +2365,10 @@ class _ChartPainter extends CustomPainter {
 
   void _text(Canvas c, String s, Offset o, Color color, {double size = 10}) {
     final tp = TextPainter(
-      text: TextSpan(text: s, style: TextStyle(color: color, fontSize: size)),
+      text: TextSpan(
+        text: s,
+        style: TextStyle(color: color, fontSize: size),
+      ),
       textDirection: TextDirection.ltr,
     )..layout();
     tp.paint(c, o);
@@ -2408,12 +2466,12 @@ class _InteractiveChartState extends State<_InteractiveChart> {
           // Horizontal drag = scrub; long-press = pin. Vertical drags are left
           // to the scroll view (neither recognizer claims them).
           onHorizontalDragStart: (d) => _updateFromX(d.localPosition.dx, width),
-          onHorizontalDragUpdate: (d) => _updateFromX(d.localPosition.dx, width),
+          onHorizontalDragUpdate: (d) =>
+              _updateFromX(d.localPosition.dx, width),
           onHorizontalDragEnd: (_) => _onEnd(),
           onHorizontalDragCancel: _onEnd,
           onLongPressStart: (d) => _updateFromX(d.localPosition.dx, width),
-          onLongPressMoveUpdate: (d) =>
-              _updateFromX(d.localPosition.dx, width),
+          onLongPressMoveUpdate: (d) => _updateFromX(d.localPosition.dx, width),
           onLongPressEnd: (_) => _onEnd(),
           child: Stack(
             children: [
@@ -2510,8 +2568,9 @@ class _InteractiveChartState extends State<_InteractiveChart> {
     // clamped to the chart by Align (it never runs off either edge).
     if (widget.pos == HoverReadoutPos.follow) {
       final double tMin = widget.t[0];
-      final double tMax =
-          widget.count > 1 ? widget.t[widget.count - 1] : tMin + 1e-3;
+      final double tMax = widget.count > 1
+          ? widget.t[widget.count - 1]
+          : tMin + 1e-3;
       final double denom = (tMax - tMin).abs() < 1e-9 ? 1e-3 : (tMax - tMin);
       final double plotLeft = _ChartPainter.padL;
       final double plotW = width - _ChartPainter.padR - plotLeft;
@@ -2614,4 +2673,3 @@ class _RenameDialogState extends State<_RenameDialog> {
     );
   }
 }
-
