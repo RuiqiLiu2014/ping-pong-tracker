@@ -15,6 +15,11 @@ import 'hit_detector.dart';
 // App version, shown top-right. Bump on app changes (1.0, 1.1, ...).
 const String kAppVersion = "1.1";
 
+/// Where the value readout appears when hovering a graph.
+/// follow = tracks the hovered point; left/right = pinned corner;
+/// adaptive = opposite the finger.
+enum HoverReadoutPos { follow, left, right, adaptive }
+
 void main() {
   FlutterBluePlus.setLogLevel(LogLevel.info, color: true);
   runApp(const PingPongTrackerApp());
@@ -153,6 +158,12 @@ class _BLETestScreenState extends State<BLETestScreen>
   // Velocity magnitude recomputed from each log's raw data (cached by log id).
   final Map<int, SpeedSeries> _speedCache = {};
 
+  // ---- Log detail view: scroll + jump-to-top ----
+  final ScrollController _detailScroll = ScrollController();
+  final GlobalKey _chartsKey = GlobalKey(); // measures the charts block height
+  double _chartsHeight = 0; // charts (item 0) height in px; 0 until measured
+  bool _showJumpTop = false; // show jump-to-top once the charts scroll off
+
   // ---- Settings (persisted) ----
   static const String _kAutoLoggingKey = "autoLoggingEnabled";
   static const String _kHitWindowKey = "hitWindowSec";
@@ -160,9 +171,13 @@ class _BLETestScreenState extends State<BLETestScreen>
   static const String _kHitThreshKey = "hitThreshG";
   static const String _kLeverArmKey = "leverArmCm";
   static const String _kResetLogsKey = "resetLogsOnLeave";
+  static const String _kHoverPersistKey = "hoverPersists";
+  static const String _kHoverPosKey = "hoverReadoutPos";
   static const String _kLogSeqKey = "logSeq"; // last issued log number
   bool _autoLoggingEnabled = true; // false => manual Start/Stop button
   bool _resetLogsOnLeave = true; // leaving Logs tab returns to the list
+  bool _hoverPersists = false; // graph hover readout stays after lifting finger
+  HoverReadoutPos _hoverPos = HoverReadoutPos.follow; // hover readout side
   double _hitWindowSec = 1.0; // data captured before AND after each hit (s)
   double _manualTimeoutSec = 4.0; // manual logging auto-stop (0.1 - 5.0 s)
   double _hitThreshG = 0.5; // ball-hit vibration threshold (lower = sensitive)
@@ -184,6 +199,20 @@ class _BLETestScreenState extends State<BLETestScreen>
   static const List<String> _accelLabels = ["ax", "ay", "az"];
   static const List<String> _gyroLabels = ["gx", "gy", "gz"];
 
+  // CSV table columns (time + 6 axes): per-column color (matching the charts),
+  // field width in monospace chars (right-aligned so columns line up), decimal
+  // places, and header label. Shared by the header and the data rows.
+  static const List<Color> _csvColColors = [
+    Colors.black54, // time
+    Colors.red, Colors.green, Colors.blue, // ax, ay, az  (match accel chart)
+    Colors.orange, Colors.purple, Colors.teal, // gx, gy, gz  (match gyro chart)
+  ];
+  static const List<int> _csvColWidth = [7, 9, 9, 9, 9, 9, 9];
+  static const List<int> _csvColDecimals = [4, 4, 4, 4, 2, 2, 2];
+  static const List<String> _csvColLabels = [
+    "time_s", "ax_g", "ay_g", "az_g", "gx_dps", "gy_dps", "gz_dps",
+  ];
+
   late final TabController _tabController;
   Timer? _uiTimer;
 
@@ -191,21 +220,41 @@ class _BLETestScreenState extends State<BLETestScreen>
   void initState() {
     super.initState();
     _tabController = TabController(length: 3, vsync: this);
-    // When enabled, leaving the Logs tab (index 1) clears the open log, so
-    // returning shows the full list instead of the last-opened log.
-    _tabController.addListener(() {
-      if (_resetLogsOnLeave &&
-          _tabController.index != 1 &&
-          _selectedLog != null) {
-        setState(() => _selectedLog = null);
-      }
-    });
-    // Repaint at ~10 Hz rather than on every BLE packet (~80 Hz).
-    _uiTimer = Timer.periodic(const Duration(milliseconds: 100), (_) {
-      if (mounted) setState(() {});
-    });
+    _tabController.addListener(_onTabChanged);
+    // The ~10 Hz repaint timer is started/stopped by tab: it only needs to run
+    // on the Connection tab (see _syncUiTimer).
+    _syncUiTimer();
+    _detailScroll.addListener(_onDetailScroll);
     _loadSettings();
     _loadLogs();
+  }
+
+  // Tab changes: (1) when enabled, leaving the Logs tab (index 1) clears the
+  // open log so returning shows the full list, and (2) start/stop the live
+  // repaint timer, which is only needed on the Connection tab.
+  void _onTabChanged() {
+    if (_resetLogsOnLeave &&
+        _tabController.index != 1 &&
+        _selectedLog != null) {
+      setState(() => _selectedLog = null);
+    }
+    _syncUiTimer();
+  }
+
+  // Repaint at ~10 Hz (rather than on every ~80 Hz BLE packet) to refresh the
+  // live streaming readouts — but ONLY while the Connection tab is showing.
+  // That tab is the only one with live data; on the Logs/Settings tabs this
+  // timer would otherwise rebuild the whole screen 10x/second and make long
+  // lists (and log-detail charts + CSV rows) janky to scroll.
+  void _syncUiTimer() {
+    if (_tabController.index == 0) {
+      _uiTimer ??= Timer.periodic(const Duration(milliseconds: 100), (_) {
+        if (mounted) setState(() {});
+      });
+    } else {
+      _uiTimer?.cancel();
+      _uiTimer = null;
+    }
   }
 
   Future<void> _loadSettings() async {
@@ -217,10 +266,19 @@ class _BLETestScreenState extends State<BLETestScreen>
     final hitThr = prefs.getDouble(_kHitThreshKey);
     final lever = prefs.getDouble(_kLeverArmKey);
     final resetLogs = prefs.getBool(_kResetLogsKey);
+    final hoverPersist = prefs.getBool(_kHoverPersistKey);
+    final hoverPosStr = prefs.getString(_kHoverPosKey);
     if (!mounted) return;
     setState(() {
       if (autoLog != null) _autoLoggingEnabled = autoLog;
       if (resetLogs != null) _resetLogsOnLeave = resetLogs;
+      if (hoverPersist != null) _hoverPersists = hoverPersist;
+      if (hoverPosStr != null) {
+        _hoverPos = HoverReadoutPos.values.firstWhere(
+          (e) => e.name == hoverPosStr,
+          orElse: () => HoverReadoutPos.follow,
+        );
+      }
       if (win != null) _hitWindowSec = win.clamp(0.25, 2.0);
       if (timeout != null) _manualTimeoutSec = timeout.clamp(0.1, 5.0);
       if (hitThr != null) _hitThreshG = hitThr.clamp(0.1, 1.5);
@@ -375,6 +433,7 @@ class _BLETestScreenState extends State<BLETestScreen>
     _uiTimer?.cancel();
     _autoStopTimer?.cancel();
     _tabController.dispose();
+    _detailScroll.dispose();
     _charSubscription?.cancel();
     _scanResultsSubscription?.cancel();
     _connStateSub?.cancel();
@@ -530,6 +589,13 @@ class _BLETestScreenState extends State<BLETestScreen>
     final int prevUs = _lastStreamPacketUs;
     final int nowUs = _streamStopwatch.elapsedMicroseconds;
 
+    // Orientation/velocity fusion feeds only the live Connection-tab readouts,
+    // so run its heavy per-sample math (trig + quaternion + matrix) only while
+    // that tab is showing. On the Logs/Settings tabs it's skipped, so streaming
+    // can't jank log scrolling. Hit detection + capture below always run, so no
+    // hits are missed; ω×r has no integration state, so nothing to keep warm.
+    final bool liveTab = _tabController.index == 0;
+
     double ax = 0, ay = 0, az = 0, gx = 0, gy = 0, gz = 0;
     for (int s = 0; s < count; s++) {
       final int b = 2 + s * 12;
@@ -541,7 +607,7 @@ class _BLETestScreenState extends State<BLETestScreen>
       gz = bd.getInt16(b + 10, Endian.little) * _gyroScaleDps;
 
       // Run the fusion filter at the true per-sample rate (fixed ODR).
-      _motion.update(ax, ay, az, gx, gy, gz);
+      if (liveTab) _motion.update(ax, ay, az, gx, gy, gz);
 
       final double tSec = (prevUs + (nowUs - prevUs) * (s + 1) / count) / 1e6;
       final double amag = math.sqrt(ax * ax + ay * ay + az * az);
@@ -693,7 +759,13 @@ class _BLETestScreenState extends State<BLETestScreen>
       // inside the window stay in this log and are marked, not split out).
       final bool done = (t - _triggerSec) >= _hitWindowSec;
       final bool full = _capCount >= kMaxLogSamples;
-      if (done || full) _finalizeCapture();
+      if (done || full) {
+        _finalizeCapture();
+        // A new log just landed. Refresh explicitly so it appears even when the
+        // repaint timer is paused (e.g. watching captures roll in on the Logs
+        // tab); on the Connection tab the timer would catch it anyway.
+        if (mounted) setState(() {});
+      }
     } else if (_armed && isHit) {
       _startHitCapture(t); // a hit → new log centered on it
     }
@@ -1317,27 +1389,66 @@ class _BLETestScreenState extends State<BLETestScreen>
     );
   }
 
+  // Fixed row height lets the list position/recycle rows without measuring each
+  // one (itemExtent below), which keeps scrolling smooth with many logs.
+  static const double _logRowHeight = 64;
+
   Widget _buildLogsList() {
-    return ListView.separated(
+    return ListView.builder(
+      // PageStorageKey persists the scroll offset when we open a log's detail
+      // view and come back, so the list stays where you left it.
+      key: const PageStorageKey('logsList'),
       itemCount: _logs.length,
-      separatorBuilder: (_, _) => const Divider(height: 1),
-      itemBuilder: (context, i) {
-        final log = _logs[i];
-        return ListTile(
-          leading: const Icon(Icons.show_chart, color: Colors.blueAccent),
-          title: Text(log.displayName),
-          subtitle: Text(
-            "#${log.id}  •  ${_fmtTime(log.timestamp)}  •  ${log.count} samples"
-            "  •  ${log.durationSec.toStringAsFixed(1)} s",
-          ),
-          trailing: _logActionsMenu(log),
-          onTap: () => setState(() => _selectedLog = log),
-        );
-      },
+      itemExtent: _logRowHeight,
+      itemBuilder: (context, i) => _logRow(_logs[i]),
     );
   }
 
-  // Per-log overflow menu: rename / export / delete.
+  // A lightweight log row: cheaper to build than ListTile + a separate Divider
+  // child, so long lists fling without jank. The divider is drawn as a bottom
+  // border instead of a separate widget.
+  Widget _logRow(SavedLog log) {
+    return InkWell(
+      onTap: () => _openLog(log),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 16),
+        decoration: const BoxDecoration(
+          border: Border(bottom: BorderSide(color: Colors.black12, width: 1)),
+        ),
+        child: Row(
+          children: [
+            const Icon(Icons.show_chart, color: Colors.blueAccent),
+            const SizedBox(width: 16),
+            Expanded(
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    log.displayName,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(fontSize: 16),
+                  ),
+                  const SizedBox(height: 2),
+                  Text(
+                    "#${log.id}  •  ${_fmtTime(log.timestamp)}"
+                    "  •  ${log.durationSec.toStringAsFixed(1)} s",
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(fontSize: 13, color: Colors.black54),
+                  ),
+                ],
+              ),
+            ),
+            _logActionsMenu(log),
+          ],
+        ),
+      ),
+    );
+  }
+
+  // Per-log overflow menu: rename / export / delete (compact dropdown).
   Widget _logActionsMenu(SavedLog log) {
     return PopupMenuButton<String>(
       tooltip: "Actions",
@@ -1372,6 +1483,63 @@ class _BLETestScreenState extends State<BLETestScreen>
           ),
         ),
       ],
+    );
+  }
+
+  // Open a log's detail view. It always starts at the top: the detail list has
+  // a different key from the logs list, so it gets a fresh ScrollPosition rather
+  // than inheriting the list's offset. We also measure the charts' height so the
+  // jump-to-top button can appear once they've scrolled out of view.
+  void _openLog(SavedLog log) {
+    setState(() {
+      _selectedLog = log;
+      _showJumpTop = false;
+      _chartsHeight = 0;
+    });
+    WidgetsBinding.instance.addPostFrameCallback((_) => _measureCharts());
+  }
+
+  // Cache the rendered height of the charts block (item 0) while it's on screen.
+  void _measureCharts() {
+    final h = _chartsKey.currentContext?.size?.height ?? 0;
+    if (h > 0) _chartsHeight = h;
+  }
+
+  // Show the jump-to-top button once the charts have scrolled fully out of view.
+  void _onDetailScroll() {
+    if (!_detailScroll.hasClients) return;
+    final double threshold = _chartsHeight > 0 ? _chartsHeight : 600;
+    final bool show = _detailScroll.offset > threshold;
+    if (show != _showJumpTop && mounted) setState(() => _showJumpTop = show);
+  }
+
+  Widget _jumpToTopButton() {
+    return Material(
+      color: Colors.blueAccent,
+      elevation: 4,
+      borderRadius: BorderRadius.circular(20),
+      child: InkWell(
+        borderRadius: BorderRadius.circular(20),
+        onTap: () => _detailScroll.animateTo(
+          0,
+          duration: const Duration(milliseconds: 300),
+          curve: Curves.easeOut,
+        ),
+        child: const Padding(
+          padding: EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(Icons.arrow_upward, size: 18, color: Colors.white),
+              SizedBox(width: 6),
+              Text(
+                "Jump to top",
+                style: TextStyle(color: Colors.white, fontWeight: FontWeight.w600),
+              ),
+            ],
+          ),
+        ),
+      ),
     );
   }
 
@@ -1415,12 +1583,40 @@ class _BLETestScreenState extends State<BLETestScreen>
           ),
         ),
         Expanded(
-          child: ListView.builder(
-            itemCount: 1 + log.count,
-            itemBuilder: (context, i) {
-              if (i == 0) return _logCharts(log, ss);
-              return _csvRow(log, i - 1);
-            },
+          child: Stack(
+            children: [
+              ListView.builder(
+                // A distinct key (vs the list's PageStorageKey) gives the detail
+                // list its own fresh ScrollPosition, so opening a log always
+                // starts at the top instead of inheriting the list's offset.
+                key: const ValueKey('logDetail'),
+                controller: _detailScroll,
+                itemCount: 1 + log.count,
+                itemBuilder: (context, i) {
+                  if (i == 0) {
+                    return KeyedSubtree(
+                      key: _chartsKey,
+                      child: _logCharts(log, ss),
+                    );
+                  }
+                  return _csvRow(log, i - 1);
+                },
+              ),
+              // Floating "jump to top", shown once the charts scroll off-screen.
+              Positioned(
+                top: 8,
+                left: 0,
+                right: 0,
+                child: IgnorePointer(
+                  ignoring: !_showJumpTop,
+                  child: AnimatedOpacity(
+                    opacity: _showJumpTop ? 1.0 : 0.0,
+                    duration: const Duration(milliseconds: 180),
+                    child: Center(child: _jumpToTopButton()),
+                  ),
+                ),
+              ),
+            ],
           ),
         ),
       ],
@@ -1447,15 +1643,26 @@ class _BLETestScreenState extends State<BLETestScreen>
             ),
           ),
         _chartSection(
-          "Speed (m/s)",
+          "Face speed (ω×r)",
           log,
-          [ss.faceSpeed, ss.speed],
-          const [Colors.indigo, Colors.grey],
-          const ["face ω×r", "accel (old)"],
+          [ss.faceSpeed],
+          const [Colors.indigo],
+          const ["face ω×r"],
           forcedMin: 0,
-          cornerText:
-              "face ${ss.maxFaceSpeed.toStringAsFixed(1)} · "
-              "old ${ss.maxSpeed.toStringAsFixed(1)} m/s",
+          cornerText: "max ${ss.maxFaceSpeed.toStringAsFixed(1)} m/s",
+          unit: "m/s",
+          decimals: 2,
+        ),
+        _chartSection(
+          "Speed (accel — old)",
+          log,
+          [ss.speed],
+          const [Colors.grey],
+          const ["accel (old)"],
+          forcedMin: 0,
+          cornerText: "max ${ss.maxSpeed.toStringAsFixed(1)} m/s",
+          unit: "m/s",
+          decimals: 2,
         ),
         _chartSection(
           "Accelerometer (G)",
@@ -1464,6 +1671,8 @@ class _BLETestScreenState extends State<BLETestScreen>
           _accelColors,
           _accelLabels,
           centerZero: true,
+          unit: "G",
+          decimals: 3,
         ),
         _chartSection(
           "Gyroscope (deg/s)",
@@ -1472,15 +1681,20 @@ class _BLETestScreenState extends State<BLETestScreen>
           _gyroColors,
           _gyroLabels,
           centerZero: true,
+          unit: "°/s",
+          decimals: 1,
         ),
         const Divider(height: 1),
-        const Padding(
-          padding: EdgeInsets.fromLTRB(12, 6, 12, 2),
-          child: Text(
-            "time_s, ax_g, ay_g, az_g, gx_dps, gy_dps, gz_dps",
-            style: TextStyle(
+        Padding(
+          padding: const EdgeInsets.fromLTRB(6, 6, 6, 2),
+          child: Text.rich(
+            TextSpan(children: _csvHeaderSpans()),
+            maxLines: 1,
+            softWrap: false,
+            overflow: TextOverflow.clip,
+            style: const TextStyle(
               fontFamily: "monospace",
-              fontSize: 11,
+              fontSize: 10,
               fontWeight: FontWeight.bold,
             ),
           ),
@@ -1489,21 +1703,43 @@ class _BLETestScreenState extends State<BLETestScreen>
     );
   }
 
+  // One colored, right-aligned span per column so the table lines up (monospace)
+  // and each column matches its chart color.
+  List<InlineSpan> _csvSpans(SavedLog log, int i) {
+    return [
+      for (int c = 0; c < 7; c++)
+        TextSpan(
+          text: (c == 0 ? log.t[i] : log.axes[c - 1][i])
+              .toStringAsFixed(_csvColDecimals[c])
+              .padLeft(_csvColWidth[c]),
+          style: TextStyle(color: _csvColColors[c]),
+        ),
+    ];
+  }
+
+  // Header spans padded to the same column widths as the data, so each label
+  // sits above its numbers.
+  List<InlineSpan> _csvHeaderSpans() {
+    return [
+      for (int c = 0; c < 7; c++)
+        TextSpan(
+          text: _csvColLabels[c].padLeft(_csvColWidth[c]),
+          style: TextStyle(color: _csvColColors[c]),
+        ),
+    ];
+  }
+
   Widget _csvRow(SavedLog log, int i) {
-    final row = StringBuffer(log.t[i].toStringAsFixed(4));
-    for (int a = 0; a < 6; a++) {
-      row.write(', ');
-      row.write(log.axes[a][i].toStringAsFixed(a < 3 ? 4 : 2));
-    }
     return SizedBox(
       height: 18,
       child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 12),
-        child: Text(
-          row.toString(),
-          style: const TextStyle(fontFamily: "monospace", fontSize: 11),
+        padding: const EdgeInsets.symmetric(horizontal: 6),
+        child: Text.rich(
+          TextSpan(children: _csvSpans(log, i)),
           maxLines: 1,
-          overflow: TextOverflow.ellipsis,
+          softWrap: false,
+          overflow: TextOverflow.clip,
+          style: const TextStyle(fontFamily: "monospace", fontSize: 10),
         ),
       ),
     );
@@ -1518,6 +1754,8 @@ class _BLETestScreenState extends State<BLETestScreen>
     double? forcedMin,
     String? cornerText,
     bool centerZero = false,
+    String unit = "",
+    int decimals = 2,
   }) {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -1533,18 +1771,20 @@ class _BLETestScreenState extends State<BLETestScreen>
           height: 150,
           child: Padding(
             padding: const EdgeInsets.symmetric(horizontal: 8),
-            child: CustomPaint(
-              painter: _ChartPainter(
-                log.t,
-                series,
-                log.count,
-                colors,
-                forcedMin: forcedMin,
-                cornerText: cornerText,
-                centerZero: centerZero,
-                hitTimes: log.hitTimes,
-              ),
-              child: const SizedBox.expand(),
+            child: _InteractiveChart(
+              t: log.t,
+              series: series,
+              count: log.count,
+              colors: colors,
+              labels: labels,
+              unit: unit,
+              decimals: decimals,
+              forcedMin: forcedMin,
+              cornerText: cornerText,
+              centerZero: centerZero,
+              hitTimes: log.hitTimes,
+              persist: _hoverPersists,
+              pos: _hoverPos,
             ),
           ),
         ),
@@ -1585,11 +1825,7 @@ class _BLETestScreenState extends State<BLETestScreen>
             "Automatic logging",
             style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
           ),
-          subtitle: Text(
-            _autoLoggingEnabled
-                ? "Swings are auto-detected and recorded."
-                : "Off — use the Start Logging button on the Connection tab.",
-          ),
+          subtitle: const Text("Each hit is auto-detected and recorded."),
           value: _autoLoggingEnabled,
           onChanged: _setAutoLogging,
         ),
@@ -1618,6 +1854,58 @@ class _BLETestScreenState extends State<BLETestScreen>
             setState(() => _resetLogsOnLeave = v);
             _prefs?.setBool(_kResetLogsKey, v);
           },
+        ),
+        const Divider(height: 24),
+        SwitchListTile(
+          contentPadding: EdgeInsets.zero,
+          title: const Text(
+            "Persist graph hover",
+            style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+          ),
+          subtitle: const Text(
+            "Keep the value readout on the graph after you lift your finger. "
+            "Off: it shows only while you're touching.",
+          ),
+          value: _hoverPersists,
+          onChanged: (v) {
+            setState(() => _hoverPersists = v);
+            _prefs?.setBool(_kHoverPersistKey, v);
+          },
+        ),
+        const SizedBox(height: 16),
+        const Text(
+          "Hover readout position",
+          style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+        ),
+        const SizedBox(height: 4),
+        const Text(
+          "Where the value box sits when you hover a graph. Follow tracks the "
+          "point you're touching; Adaptive keeps it opposite your finger.",
+          style: TextStyle(color: Colors.grey),
+        ),
+        const SizedBox(height: 8),
+        SingleChildScrollView(
+          scrollDirection: Axis.horizontal,
+          child: SegmentedButton<HoverReadoutPos>(
+            showSelectedIcon: false,
+            segments: const [
+              ButtonSegment(
+                value: HoverReadoutPos.follow,
+                label: Text("Follow"),
+              ),
+              ButtonSegment(value: HoverReadoutPos.left, label: Text("Left")),
+              ButtonSegment(value: HoverReadoutPos.right, label: Text("Right")),
+              ButtonSegment(
+                value: HoverReadoutPos.adaptive,
+                label: Text("Adaptive"),
+              ),
+            ],
+            selected: {_hoverPos},
+            onSelectionChanged: (s) {
+              setState(() => _hoverPos = s.first);
+              _prefs?.setString(_kHoverPosKey, _hoverPos.name);
+            },
+          ),
         ),
       ],
     );
@@ -1804,6 +2092,11 @@ class _ChartPainter extends CustomPainter {
   final String? cornerText; // optional label drawn in the top-right corner
   final bool centerZero; // if true, y-axis is symmetric about 0 (0 centered)
   final List<double> hitTimes; // detected ball-hit times (s) -> vertical lines
+  final int? touchIndex; // sample under the finger -> crosshair + dots
+
+  // Plot insets, shared with _InteractiveChart so a touch x maps to the same
+  // axis the painter draws.
+  static const double padL = 46, padR = 10, padT = 10, padB = 22;
 
   _ChartPainter(
     this.t,
@@ -1814,6 +2107,7 @@ class _ChartPainter extends CustomPainter {
     this.cornerText,
     this.centerZero = false,
     this.hitTimes = const [],
+    this.touchIndex,
   });
 
   @override
@@ -1823,7 +2117,6 @@ class _ChartPainter extends CustomPainter {
       Paint()..color = const Color(0xFFFAFAFA),
     );
 
-    const double padL = 46, padR = 10, padT = 10, padB = 22;
     final plot = Rect.fromLTRB(
       padL,
       padT,
@@ -1909,9 +2202,21 @@ class _ChartPainter extends CustomPainter {
       );
     }
 
-    hline(vMax);
-    if (vMin < 0 && vMax > 0) hline(0);
-    hline(vMin);
+    // Horizontal grid lines with value labels (4 even divisions).
+    for (int k = 0; k <= 4; k++) {
+      hline(vMin + (vMax - vMin) * k / 4);
+    }
+    // Emphasize the zero line when the range crosses it.
+    if (vMin < 0 && vMax > 0) {
+      final y = yOf(0);
+      canvas.drawLine(
+        Offset(plot.left, y),
+        Offset(plot.right, y),
+        Paint()
+          ..color = Colors.black38
+          ..strokeWidth = 1,
+      );
+    }
 
     for (int k = 0; k <= 4; k++) {
       final tt = tMin + (tMax - tMin) * k / 4;
@@ -1961,6 +2266,31 @@ class _ChartPainter extends CustomPainter {
       }
     }
 
+    // Touch crosshair + a dot on each trace at the hovered sample.
+    if (touchIndex != null && touchIndex! >= 0 && touchIndex! < count) {
+      final int ti = touchIndex!;
+      final double cx = xOf(t[ti]);
+      canvas.drawLine(
+        Offset(cx, plot.top),
+        Offset(cx, plot.bottom),
+        Paint()
+          ..color = Colors.black54
+          ..strokeWidth = 1,
+      );
+      for (int a = 0; a < series.length; a++) {
+        final double cy = yOf(series[a][ti]);
+        canvas.drawCircle(Offset(cx, cy), 3.5, Paint()..color = colors[a]);
+        canvas.drawCircle(
+          Offset(cx, cy),
+          3.5,
+          Paint()
+            ..style = PaintingStyle.stroke
+            ..color = Colors.white
+            ..strokeWidth = 1.2,
+        );
+      }
+    }
+
     // Optional corner label (e.g. max speed), top-right inside the plot.
     if (cornerText != null) {
       final tp = TextPainter(
@@ -1994,7 +2324,241 @@ class _ChartPainter extends CustomPainter {
       old.forcedMin != forcedMin ||
       old.cornerText != cornerText ||
       old.centerZero != centerZero ||
-      old.hitTimes != hitTimes;
+      old.hitTimes != hitTimes ||
+      old.touchIndex != touchIndex;
+}
+
+/// Wraps a [_ChartPainter] with touch tracking: dragging horizontally (or
+/// pressing and holding) shows a crosshair at the nearest sample plus a readout
+/// of the exact value(s). Vertical drags fall through to the enclosing scroll
+/// view, so the detail page still scrolls normally.
+class _InteractiveChart extends StatefulWidget {
+  final Float64List t;
+  final List<Float32List> series;
+  final int count;
+  final List<Color> colors;
+  final List<String>? labels;
+  final String unit;
+  final int decimals;
+  final double? forcedMin;
+  final String? cornerText;
+  final bool centerZero;
+  final List<double> hitTimes;
+  final bool persist; // keep the readout after the finger lifts
+  final HoverReadoutPos pos; // which side the readout box sits on
+
+  const _InteractiveChart({
+    required this.t,
+    required this.series,
+    required this.count,
+    required this.colors,
+    required this.labels,
+    required this.unit,
+    required this.decimals,
+    required this.forcedMin,
+    required this.cornerText,
+    required this.centerZero,
+    required this.hitTimes,
+    required this.persist,
+    required this.pos,
+  });
+
+  @override
+  State<_InteractiveChart> createState() => _InteractiveChartState();
+}
+
+class _InteractiveChartState extends State<_InteractiveChart> {
+  int? _touchIndex;
+
+  // Map an x within the plot to the nearest sample index (samples are ~uniform).
+  void _updateFromX(double dx, double width) {
+    final int n = widget.count;
+    if (n < 2) return;
+    final double plotLeft = _ChartPainter.padL;
+    final double plotW = width - _ChartPainter.padR - plotLeft;
+    if (plotW <= 0) return;
+    final double frac = ((dx - plotLeft) / plotW).clamp(0.0, 1.0);
+    final int idx = (frac * (n - 1)).round().clamp(0, n - 1);
+    if (idx != _touchIndex) setState(() => _touchIndex = idx);
+  }
+
+  void _clear() {
+    if (_touchIndex != null) setState(() => _touchIndex = null);
+  }
+
+  // On finger-lift: keep the readout when "persist" is on, else clear it.
+  void _onEnd() {
+    if (!widget.persist) _clear();
+  }
+
+  @override
+  void didUpdateWidget(_InteractiveChart old) {
+    super.didUpdateWidget(old);
+    // Turning persist off drops any pinned crosshair on the next rebuild.
+    if (old.persist && !widget.persist) _touchIndex = null;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final double width = constraints.maxWidth;
+        return GestureDetector(
+          behavior: HitTestBehavior.opaque,
+          // Horizontal drag = scrub; long-press = pin. Vertical drags are left
+          // to the scroll view (neither recognizer claims them).
+          onHorizontalDragStart: (d) => _updateFromX(d.localPosition.dx, width),
+          onHorizontalDragUpdate: (d) => _updateFromX(d.localPosition.dx, width),
+          onHorizontalDragEnd: (_) => _onEnd(),
+          onHorizontalDragCancel: _onEnd,
+          onLongPressStart: (d) => _updateFromX(d.localPosition.dx, width),
+          onLongPressMoveUpdate: (d) =>
+              _updateFromX(d.localPosition.dx, width),
+          onLongPressEnd: (_) => _onEnd(),
+          child: Stack(
+            children: [
+              CustomPaint(
+                painter: _ChartPainter(
+                  widget.t,
+                  widget.series,
+                  widget.count,
+                  widget.colors,
+                  forcedMin: widget.forcedMin,
+                  cornerText: widget.cornerText,
+                  centerZero: widget.centerZero,
+                  hitTimes: widget.hitTimes,
+                  touchIndex: _touchIndex,
+                ),
+                child: const SizedBox.expand(),
+              ),
+              if (_touchIndex != null) _readout(width),
+            ],
+          ),
+        );
+      },
+    );
+  }
+
+  Widget _readout(double width) {
+    final int ti = _touchIndex!;
+    // A dismiss control only makes sense for a pinned (persistent) readout.
+    final bool showClose = widget.persist;
+    final children = <Widget>[
+      Text(
+        "t = ${widget.t[ti].toStringAsFixed(3)} s",
+        style: const TextStyle(
+          fontSize: 11,
+          fontWeight: FontWeight.bold,
+          color: Colors.black87,
+        ),
+      ),
+      for (int a = 0; a < widget.series.length; a++)
+        Text(
+          "${_label(a)}: "
+          "${widget.series[a][ti].toStringAsFixed(widget.decimals)}"
+          "${widget.unit.isEmpty ? "" : " ${widget.unit}"}",
+          style: TextStyle(
+            fontSize: 11,
+            fontWeight: FontWeight.w600,
+            color: widget.colors[a],
+          ),
+        ),
+    ];
+    final Widget box = Stack(
+      clipBehavior: Clip.none,
+      children: [
+        // The box passes touches through, so you can keep scrubbing under it…
+        IgnorePointer(
+          child: Container(
+            // Reserve room on the right for the close button so it never sits
+            // over a value.
+            padding: EdgeInsets.fromLTRB(8, 6, showClose ? 26 : 8, 6),
+            decoration: BoxDecoration(
+              color: const Color(0xF2FFFFFF),
+              borderRadius: BorderRadius.circular(6),
+              border: Border.all(color: Colors.black26),
+            ),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: children,
+            ),
+          ),
+        ),
+        // …except the close button, which stays tappable to clear the pin.
+        if (showClose)
+          Positioned(
+            top: 2,
+            right: 2,
+            child: Material(
+              color: Colors.black54,
+              shape: const CircleBorder(),
+              child: InkWell(
+                customBorder: const CircleBorder(),
+                onTap: _clear,
+                child: const Padding(
+                  padding: EdgeInsets.all(2),
+                  child: Icon(Icons.close, size: 14, color: Colors.white),
+                ),
+              ),
+            ),
+          ),
+      ],
+    );
+
+    // Follow mode: the box tracks the crosshair's x, centered above it and
+    // clamped to the chart by Align (it never runs off either edge).
+    if (widget.pos == HoverReadoutPos.follow) {
+      final double tMin = widget.t[0];
+      final double tMax =
+          widget.count > 1 ? widget.t[widget.count - 1] : tMin + 1e-3;
+      final double denom = (tMax - tMin).abs() < 1e-9 ? 1e-3 : (tMax - tMin);
+      final double plotLeft = _ChartPainter.padL;
+      final double plotW = width - _ChartPainter.padR - plotLeft;
+      double alignX = 0;
+      if (plotW > 0) {
+        final double cx =
+            plotLeft + ((widget.t[ti] - tMin) / denom).clamp(0.0, 1.0) * plotW;
+        alignX = ((cx / width) * 2 - 1).clamp(-1.0, 1.0);
+      }
+      return Positioned(
+        top: 6,
+        left: 0,
+        right: 0,
+        child: Align(alignment: Alignment(alignX, -1), child: box),
+      );
+    }
+
+    // Fixed corner (left/right) or adaptive (opposite the finger).
+    final bool boxOnLeft;
+    switch (widget.pos) {
+      case HoverReadoutPos.left:
+        boxOnLeft = true;
+        break;
+      case HoverReadoutPos.right:
+        boxOnLeft = false;
+        break;
+      case HoverReadoutPos.adaptive:
+        final double frac = widget.count > 1 ? ti / (widget.count - 1) : 0.0;
+        boxOnLeft = frac >= 0.5; // finger on the right -> box on the left
+        break;
+      case HoverReadoutPos.follow:
+        boxOnLeft = false; // handled above
+        break;
+    }
+    return Positioned(
+      top: 6,
+      left: boxOnLeft ? 6 : null,
+      right: boxOnLeft ? null : 6,
+      child: box,
+    );
+  }
+
+  String _label(int a) {
+    final labels = widget.labels;
+    if (labels != null && a < labels.length) return labels[a];
+    return "v$a";
+  }
 }
 
 /// Rename dialog that owns its text controller, so the controller is disposed
