@@ -114,21 +114,15 @@ class _BLETestScreenState extends State<BLETestScreen>
   // ---- Auto-capture (motion-triggered logging) ----
   // Instead of a manual start/stop button, we continuously watch the incoming
   // stream and auto-record a fixed window around any strong motion (a swing).
-  // A ring buffer keeps the most recent samples so a capture can prepend
-  // history from BEFORE the trigger; an equal (mirrored) window is then
-  // recorded AFTER it. The window is a fixed duration, NOT "until still", so
-  // each acceleration peak yields its own single-peak capture — one physical
-  // stroke can therefore produce two logs (the forward swing and the recovery).
-  //
-  // Trigger metric: raw accelerometer magnitude |a| in g (≈1 g at rest, spikes
-  // well above that during a swing) — needs no orientation/calibration. We fire
-  // on the rising edge (below→above threshold) so a single peak triggers once.
+  // Trigger: each detected BALL HIT (from the vibration hit detector) starts a
+  // capture. A ring buffer supplies the "before" history; recording then
+  // continues for the same amount AFTER the hit. So every hit becomes its own
+  // log with `_hitWindowSec` of data on each side (default 1 s).
   static const int kMaxLogSamples = 20000; // ~12 s headroom at 1660 Hz
-  static const int _kRingCap = 2500; // ~1.5 s of pre-trigger history
+  static const int _kRingCap = 3400; // ~2 s of pre-hit history (max window)
 
-  bool _armed = false; // auto-capture enabled (watching for motion)
-  bool _recording = false; // currently capturing a window
-  bool _wasAboveThresh = false; // prev sample above threshold (edge detection)
+  bool _armed = false; // auto-capture enabled (watching for a hit)
+  bool _recording = false; // currently capturing a window around a hit
 
   // Manual logging (used when automatic logging is turned off): a Start/Stop
   // button records straight into the capture buffer until stopped or a timeout.
@@ -159,11 +153,9 @@ class _BLETestScreenState extends State<BLETestScreen>
   // Velocity magnitude recomputed from each log's raw data (cached by log id).
   final Map<int, SpeedSeries> _speedCache = {};
 
-  // ---- Settings (persisted): auto-capture tuning (placeholder defaults) ----
+  // ---- Settings (persisted) ----
   static const String _kAutoLoggingKey = "autoLoggingEnabled";
-  static const String _kTriggerGKey = "accelTriggerG";
-  static const String _kPreTrigKey = "preTriggerSec";
-  static const String _kPostTrigKey = "postTriggerSec";
+  static const String _kHitWindowKey = "hitWindowSec";
   static const String _kManualTimeoutKey = "manualTimeoutSec";
   static const String _kHitThreshKey = "hitThreshG";
   static const String _kLeverArmKey = "leverArmCm";
@@ -171,9 +163,7 @@ class _BLETestScreenState extends State<BLETestScreen>
   static const String _kLogSeqKey = "logSeq"; // last issued log number
   bool _autoLoggingEnabled = true; // false => manual Start/Stop button
   bool _resetLogsOnLeave = true; // leaving Logs tab returns to the list
-  double _accelTriggerG = 3.0; // |a| threshold to start a capture (g)
-  double _preTriggerSec = 0.5; // window recorded before the trigger
-  double _postTriggerSec = 0.5; // window recorded after the trigger (mirror)
+  double _hitWindowSec = 1.0; // data captured before AND after each hit (s)
   double _manualTimeoutSec = 4.0; // manual logging auto-stop (0.1 - 5.0 s)
   double _hitThreshG = 0.5; // ball-hit vibration threshold (lower = sensitive)
   double _leverArmCm = 12.0; // sensor -> paddle-face distance for omega x r
@@ -222,9 +212,7 @@ class _BLETestScreenState extends State<BLETestScreen>
     final prefs = await SharedPreferences.getInstance();
     _prefs = prefs;
     final autoLog = prefs.getBool(_kAutoLoggingKey);
-    final tg = prefs.getDouble(_kTriggerGKey);
-    final pre = prefs.getDouble(_kPreTrigKey);
-    final post = prefs.getDouble(_kPostTrigKey);
+    final win = prefs.getDouble(_kHitWindowKey);
     final timeout = prefs.getDouble(_kManualTimeoutKey);
     final hitThr = prefs.getDouble(_kHitThreshKey);
     final lever = prefs.getDouble(_kLeverArmKey);
@@ -233,9 +221,7 @@ class _BLETestScreenState extends State<BLETestScreen>
     setState(() {
       if (autoLog != null) _autoLoggingEnabled = autoLog;
       if (resetLogs != null) _resetLogsOnLeave = resetLogs;
-      if (tg != null) _accelTriggerG = tg.clamp(1.0, 8.0);
-      if (pre != null) _preTriggerSec = pre.clamp(0.1, 1.5);
-      if (post != null) _postTriggerSec = post.clamp(0.1, 1.5);
+      if (win != null) _hitWindowSec = win.clamp(0.25, 2.0);
       if (timeout != null) _manualTimeoutSec = timeout.clamp(0.1, 5.0);
       if (hitThr != null) _hitThreshG = hitThr.clamp(0.1, 1.5);
       if (lever != null) _leverArmCm = lever.clamp(2.0, 30.0);
@@ -560,11 +546,13 @@ class _BLETestScreenState extends State<BLETestScreen>
       final double tSec = (prevUs + (nowUs - prevUs) * (s + 1) / count) / 1e6;
       final double amag = math.sqrt(ax * ax + ay * ay + az * az);
 
-      // Ball-hit detection runs continuously (so pre-trigger history is covered).
-      if (_hitDetector.update(tSec, amag)) _recordHit(tSec);
+      // Ball-hit detection runs continuously; a hit both marks the log and (in
+      // auto mode) triggers a capture centered on it.
+      final bool isHit = _hitDetector.update(tSec, amag);
+      if (isHit) _recordHit(tSec);
 
       if (_autoLoggingEnabled) {
-        _processAutoCapture(tSec, amag, ax, ay, az, gx, gy, gz);
+        _processAutoCapture(tSec, isHit, ax, ay, az, gx, gy, gz);
       } else if (_isManualLogging) {
         _appendManualSample(tSec, ax, ay, az, gx, gy, gz);
       }
@@ -622,7 +610,6 @@ class _BLETestScreenState extends State<BLETestScreen>
       _imuData = ["0.00", "0.00", "0.00", "0.00", "0.00", "0.00"];
       _armed = false;
       _recording = false;
-      _wasAboveThresh = false;
       _isManualLogging = false;
       _streamStopwatch
         ..stop()
@@ -650,7 +637,7 @@ class _BLETestScreenState extends State<BLETestScreen>
     _ringAxes ??= List.generate(6, (_) => Float32List(_kRingCap));
   }
 
-  // Arm/disarm the auto-capture watcher (only meaningful while streaming).
+  // Arm/disarm the hit-capture watcher (only meaningful while streaming).
   void _toggleArmed() {
     setState(() {
       if (_armed) {
@@ -658,22 +645,19 @@ class _BLETestScreenState extends State<BLETestScreen>
         _armed = false;
       } else {
         _ensureCaptureBuffers();
-        // Assume "above" so a capture needs a genuine below→above edge; this
-        // avoids triggering immediately if we arm mid-motion.
-        _wasAboveThresh = true;
         _armed = true;
       }
     });
   }
 
-  // Ring-buffer + trigger state machine, run once per IMU sample. The ring is
-  // always kept warm; when armed, a rising-edge threshold crossing starts a
-  // capture seeded with pre-trigger history, then a fixed (mirrored) post
-  // window is recorded before finalizing — so each peak is one single-peak
-  // capture. Called from the packet loop; the 10 Hz UI timer reflects changes.
+  // Ring-buffer + hit-trigger state machine, run once per IMU sample. The ring
+  // is always kept warm; when armed, a detected ball hit starts a capture
+  // seeded with the "before" history, then records the same amount AFTER the
+  // hit before finalizing — so each hit becomes its own log. Called from the
+  // packet loop; the 10 Hz UI timer reflects state changes.
   void _processAutoCapture(
     double t,
-    double amag,
+    bool isHit,
     double ax,
     double ay,
     double az,
@@ -683,7 +667,7 @@ class _BLETestScreenState extends State<BLETestScreen>
   ) {
     if (_ringAxes == null) return; // buffers not allocated yet
 
-    // Always push into the ring so pre-trigger history is fresh.
+    // Always push into the ring so the "before-hit" history is fresh.
     _ringT![_ringHead] = t;
     _ringAxes![0][_ringHead] = ax;
     _ringAxes![1][_ringHead] = ay;
@@ -693,8 +677,6 @@ class _BLETestScreenState extends State<BLETestScreen>
     _ringAxes![5][_ringHead] = gz;
     _ringHead = (_ringHead + 1) % _kRingCap;
     if (_ringLen < _kRingCap) _ringLen++;
-
-    final bool above = amag >= _accelTriggerG;
 
     if (_recording) {
       if (_capCount < kMaxLogSamples) {
@@ -707,22 +689,20 @@ class _BLETestScreenState extends State<BLETestScreen>
         _capAxes![5][_capCount] = gz;
         _capCount++;
       }
-      // Fixed window: stop once the mirrored post-trigger time has elapsed
-      // (or the safety buffer fills).
-      final bool done = (t - _triggerSec) >= _postTriggerSec;
+      // Stop once we've recorded the "after" window past the hit (further hits
+      // inside the window stay in this log and are marked, not split out).
+      final bool done = (t - _triggerSec) >= _hitWindowSec;
       final bool full = _capCount >= kMaxLogSamples;
       if (done || full) _finalizeCapture();
-    } else if (_armed && above && !_wasAboveThresh) {
-      _startCapture(t); // rising edge → new single-peak capture
+    } else if (_armed && isHit) {
+      _startHitCapture(t); // a hit → new log centered on it
     }
-
-    _wasAboveThresh = above;
   }
 
-  // Begin a capture: copy the most recent pre-trigger window from the ring
-  // (which already includes the triggering sample) into the capture buffer.
-  void _startCapture(double triggerT) {
-    final int pre = math.min(_ringLen, (_preTriggerSec * _odrHz).round());
+  // Begin a capture on a hit: copy the most recent `_hitWindowSec` of history
+  // from the ring (which already includes the hit sample) as the "before" part.
+  void _startHitCapture(double hitT) {
+    final int pre = math.min(_ringLen, (_hitWindowSec * _odrHz).round());
     int idx = (_ringHead - pre + _kRingCap) % _kRingCap;
     for (int j = 0; j < pre; j++) {
       _capT![j] = _ringT![idx];
@@ -732,7 +712,7 @@ class _BLETestScreenState extends State<BLETestScreen>
       idx = (idx + 1) % _kRingCap;
     }
     _capCount = pre;
-    _triggerSec = triggerT;
+    _triggerSec = hitT;
     _recording = true;
   }
 
@@ -1239,10 +1219,10 @@ class _BLETestScreenState extends State<BLETestScreen>
           const SizedBox(height: 8),
           Text(
             _recording
-                ? "● Recording swing… $_capCount samples"
+                ? "● Capturing hit… $_capCount samples"
                 : _armed
-                ? "Armed — waiting for motion "
-                      "(|a| ≥ ${_accelTriggerG.toStringAsFixed(1)} g)"
+                ? "Armed — a log is saved on each ball hit "
+                      "(±${_hitWindowSec.toStringAsFixed(2)} s)"
                 : (_logs.isNotEmpty
                       ? "${_logs.length} log(s) saved — see Logs tab"
                       : "Disarmed"),
@@ -1297,7 +1277,7 @@ class _BLETestScreenState extends State<BLETestScreen>
       return Center(
         child: Text(
           _autoLoggingEnabled
-              ? "No logs yet.\nConnect, then Arm Auto-Capture and swing."
+              ? "No logs yet.\nConnect, Arm Auto-Capture, then hit a ball."
               : "No logs yet.\nConnect, then tap Start Logging.",
           textAlign: TextAlign.center,
           style: const TextStyle(color: Colors.grey),
@@ -1712,51 +1692,27 @@ class _BLETestScreenState extends State<BLETestScreen>
   List<Widget> _autoCaptureSettings() {
     return [
       const Text(
-        "Auto-capture tuning",
+        "Auto-capture (per hit)",
         style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
       ),
       const SizedBox(height: 4),
       const Text(
-        "A capture fires on the rising edge when the accelerometer magnitude "
-        "crosses the trigger. It records a fixed window: the pre-trigger "
-        "history before the crossing plus the post-trigger window after it "
-        "(set them equal to mirror). Each peak is one capture, so a single "
-        "stroke can produce two logs — the forward swing and the recovery.",
+        "When armed, every detected ball hit is saved as its own log. The window "
+        "sets how much data is kept before AND after each hit (so total length is "
+        "twice this). Hit detection uses the Hit threshold above.",
         style: TextStyle(color: Colors.grey),
       ),
       const SizedBox(height: 8),
       _settingSlider(
-        label: "Trigger threshold",
-        value: _accelTriggerG,
-        min: 1.0,
-        max: 8.0,
-        divisions: 70, // 0.1 g steps
-        unit: "g",
-        decimals: 1,
-        onChanged: (v) => setState(() => _accelTriggerG = v),
-        onChangeEnd: (v) => _prefs?.setDouble(_kTriggerGKey, v),
-      ),
-      _settingSlider(
-        label: "Pre-trigger window",
-        value: _preTriggerSec,
-        min: 0.1,
-        max: 1.5,
-        divisions: 28, // 0.05 s steps
+        label: "Window (before & after hit)",
+        value: _hitWindowSec,
+        min: 0.25,
+        max: 2.0,
+        divisions: 35, // 0.05 s steps
         unit: "s",
         decimals: 2,
-        onChanged: (v) => setState(() => _preTriggerSec = v),
-        onChangeEnd: (v) => _prefs?.setDouble(_kPreTrigKey, v),
-      ),
-      _settingSlider(
-        label: "Post-trigger window",
-        value: _postTriggerSec,
-        min: 0.1,
-        max: 1.5,
-        divisions: 28, // 0.05 s steps
-        unit: "s",
-        decimals: 2,
-        onChanged: (v) => setState(() => _postTriggerSec = v),
-        onChangeEnd: (v) => _prefs?.setDouble(_kPostTrigKey, v),
+        onChanged: (v) => setState(() => _hitWindowSec = v),
+        onChangeEnd: (v) => _prefs?.setDouble(_kHitWindowKey, v),
       ),
     ];
   }
