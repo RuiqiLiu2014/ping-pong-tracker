@@ -13,7 +13,7 @@ import 'motion_estimator.dart';
 import 'hit_detector.dart';
 
 // App version, shown top-right. Bump on app changes (1.0, 1.1, ...).
-const String kAppVersion = "1.1";
+const String kAppVersion = "1.2";
 
 /// Where the value readout appears when hovering a graph.
 /// follow = tracks the hovered point; left/right = pinned corner;
@@ -174,6 +174,9 @@ class _BLETestScreenState extends State<BLETestScreen>
   static const String _kResetLogsKey = "resetLogsOnLeave";
   static const String _kHoverPersistKey = "hoverPersists";
   static const String _kHoverPosKey = "hoverReadoutPos";
+  static const String _kFaceNormXKey = "faceNormalX";
+  static const String _kFaceNormYKey = "faceNormalY";
+  static const String _kFaceNormZKey = "faceNormalZ";
   static const String _kLogSeqKey = "logSeq"; // last issued log number
   bool _autoLoggingEnabled = true; // false => manual Start/Stop button
   bool _resetLogsOnLeave = true; // leaving Logs tab returns to the list
@@ -183,6 +186,9 @@ class _BLETestScreenState extends State<BLETestScreen>
   double _manualTimeoutSec = 4.0; // manual logging auto-stop (0.1 - 5.0 s)
   double _hitThreshG = 0.5; // ball-hit vibration threshold (lower = sensitive)
   double _leverArmCm = 12.0; // sensor -> paddle-face distance for omega x r
+  // Paddle-face normal in the board frame from the last face-up calibration
+  // (persisted). Used live and to split recorded logs into closing/brushing.
+  List<double>? _faceNormal;
   SharedPreferences? _prefs;
 
   // Accelerometer and gyroscope are drawn on separate, independently-scaled
@@ -232,6 +238,7 @@ class _BLETestScreenState extends State<BLETestScreen>
     // on the Connection tab (see _syncUiTimer).
     _syncUiTimer();
     _detailScroll.addListener(_onDetailScroll);
+    _motion.onCalibrated = _onMotionCalibrated;
     _loadSettings();
     _loadLogs();
   }
@@ -278,6 +285,9 @@ class _BLETestScreenState extends State<BLETestScreen>
     final resetLogs = prefs.getBool(_kResetLogsKey);
     final hoverPersist = prefs.getBool(_kHoverPersistKey);
     final hoverPosStr = prefs.getString(_kHoverPosKey);
+    final fnx = prefs.getDouble(_kFaceNormXKey);
+    final fny = prefs.getDouble(_kFaceNormYKey);
+    final fnz = prefs.getDouble(_kFaceNormZKey);
     if (!mounted) return;
     setState(() {
       if (autoLog != null) _autoLoggingEnabled = autoLog;
@@ -293,6 +303,10 @@ class _BLETestScreenState extends State<BLETestScreen>
       if (timeout != null) _manualTimeoutSec = timeout.clamp(0.1, 5.0);
       if (hitThr != null) _hitThreshG = hitThr.clamp(0.1, 1.5);
       if (lever != null) _leverArmCm = lever.clamp(2.0, 30.0);
+      if (fnx != null && fny != null && fnz != null) {
+        _faceNormal = [fnx, fny, fnz];
+        _motion.setFaceNormal(fnx, fny, fnz);
+      }
       _hitDetector.threshold = _hitThreshG;
       _motion.leverArmM = _leverArmCm / 100.0;
     });
@@ -710,6 +724,20 @@ class _BLETestScreenState extends State<BLETestScreen>
 
   void _calibrateMotion() {
     setState(() => _motion.startCalibration());
+  }
+
+  // Called when a live face-up calibration completes: persist the captured face
+  // normal (a mounting constant) and drop cached log speeds so open/next logs
+  // re-split with the new normal.
+  void _onMotionCalibrated() {
+    final n = _motion.faceNormal;
+    if (n == null) return;
+    _faceNormal = n;
+    _prefs?.setDouble(_kFaceNormXKey, n[0]);
+    _prefs?.setDouble(_kFaceNormYKey, n[1]);
+    _prefs?.setDouble(_kFaceNormZKey, n[2]);
+    _speedCache.clear();
+    if (mounted) setState(() {});
   }
 
   // =========================================================================
@@ -1213,7 +1241,8 @@ class _BLETestScreenState extends State<BLETestScreen>
     final String orientationText = m.calibrated
         ? "Roll: ${m.roll.toStringAsFixed(0)}°   Pitch: ${m.pitch.toStringAsFixed(0)}°"
         : (m.calibrating
-              ? "Calibrating… hold still (${(m.calProgress * 100).toStringAsFixed(0)}%)"
+              ? "Calibrating… forehand face up, hold still "
+                    "(${(m.calProgress * 100).toStringAsFixed(0)}%)"
               : "Not calibrated");
     return SingleChildScrollView(
       padding: const EdgeInsets.fromLTRB(16, 24, 16, 24),
@@ -1274,16 +1303,32 @@ class _BLETestScreenState extends State<BLETestScreen>
             streaming ? "${m.faceSpeed.toStringAsFixed(2)} m/s" : "—",
             style: const TextStyle(fontSize: 20),
           ),
+          if (streaming && m.hasFaceNormal)
+            Text(
+              "⟂ closing ${m.faceSpeedPerp.toStringAsFixed(2)}   "
+              "∥ brushing ${m.faceSpeedPar.toStringAsFixed(2)} m/s",
+              style: const TextStyle(fontSize: 15, color: Colors.grey),
+            ),
           const SizedBox(height: 14),
           OutlinedButton.icon(
             onPressed: (streaming && !m.calibrating) ? _calibrateMotion : null,
             icon: const Icon(Icons.explore),
             label: Text(
-              m.calibrated
-                  ? "Recalibrate (hold still)"
-                  : "Calibrate (hold still)",
+              m.hasFaceNormal
+                  ? "Recalibrate (forehand face up)"
+                  : "Calibrate (forehand face up)",
             ),
           ),
+          if (m.hasFaceNormal && !m.faceNormalValid)
+            const Padding(
+              padding: EdgeInsets.only(top: 6),
+              child: Text(
+                "Face-up pose looks off — recalibrate with the forehand face "
+                "pointing straight up.",
+                textAlign: TextAlign.center,
+                style: TextStyle(fontSize: 12, color: Colors.orange),
+              ),
+            ),
           const SizedBox(height: 28),
           ElevatedButton(
             onPressed: _isConnecting || streaming
@@ -1592,6 +1637,7 @@ class _BLETestScreenState extends State<BLETestScreen>
         log.axes,
         log.count,
         leverArmM: _leverArmCm / 100.0,
+        faceNormal: _faceNormal,
       ),
     );
     // Fixed back/title/actions bar, then one lazy list holding the charts
@@ -1687,17 +1733,43 @@ class _BLETestScreenState extends State<BLETestScreen>
               ],
             ),
           ),
-        _chartSection(
-          "Face speed (ω×r)",
-          log,
-          [ss.faceSpeed],
-          const [Colors.indigo],
-          const ["face ω×r"],
-          forcedMin: 0,
-          cornerText: "max ${ss.maxFaceSpeed.toStringAsFixed(1)} m/s",
-          unit: "m/s",
-          decimals: 2,
-        ),
+        if (ss.hasComponents)
+          // Total, closing (⟂) and brushing (∥) speeds overlaid on one chart.
+          _chartSection(
+            "Face speed (ω×r)",
+            log,
+            [ss.faceSpeed, ss.facePerp, ss.facePar],
+            const [Colors.indigo, Colors.deepOrange, Colors.teal],
+            const ["total speed", "⟂ speed", "∥ speed"],
+            forcedMin: 0,
+            cornerText:
+                "max ${ss.maxFaceSpeed.toStringAsFixed(1)} · "
+                "⟂ ${ss.maxFacePerp.toStringAsFixed(1)} · "
+                "∥ ${ss.maxFacePar.toStringAsFixed(1)} m/s",
+            unit: "m/s",
+            decimals: 2,
+          )
+        else ...[
+          _chartSection(
+            "Face speed (ω×r)",
+            log,
+            [ss.faceSpeed],
+            const [Colors.indigo],
+            const ["total speed"],
+            forcedMin: 0,
+            cornerText: "max ${ss.maxFaceSpeed.toStringAsFixed(1)} m/s",
+            unit: "m/s",
+            decimals: 2,
+          ),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(12, 4, 12, 8),
+            child: Text(
+              "Calibrate face-up on the Connection tab to split face speed into "
+              "closing (⟂ to face) and brushing (∥ to face) components.",
+              style: TextStyle(fontSize: 12, color: Colors.grey.shade600),
+            ),
+          ),
+        ],
         _chartSection(
           "Speed (accel — old)",
           log,

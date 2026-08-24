@@ -56,10 +56,45 @@ class MotionEstimator {
   // Outputs for display
   double roll = 0, pitch = 0, tilt = 0, speed = 0;
   double faceSpeed = 0; // |omega x r|, drift-free paddle-face speed (m/s)
+  double faceSpeedPerp = 0; // component along the face normal (closing), m/s
+  double faceSpeedPar = 0; // component in the face plane (brushing), m/s
+
+  // Unit face normal in the BOARD frame, captured by a face-up calibration
+  // (with the face up, gravity points along the face normal). Both omega x r
+  // and this vector live in the board frame, so the closing/brushing split is
+  // orientation-independent — no world-orientation tracking needed. null until
+  // a face-up calibration (or setFaceNormal) provides it.
+  List<double>? _faceNormal;
+
+  // Fired once when a live calibration completes, so the app can persist the
+  // captured face normal. Not used by replay (computeSpeedSeries).
+  void Function()? onCalibrated;
 
   double get calProgress => calibrating
       ? (_calN / _calTarget).clamp(0.0, 1.0)
       : (calibrated ? 1.0 : 0.0);
+
+  bool get hasFaceNormal => _faceNormal != null;
+  List<double>? get faceNormal =>
+      _faceNormal == null ? null : List<double>.of(_faceNormal!);
+
+  /// True when the captured normal looks like a genuine face-up pose: roughly
+  /// perpendicular to the handle axis (i.e. the user didn't hold the handle up,
+  /// which would make the split degenerate).
+  bool get faceNormalValid {
+    final n = _faceNormal;
+    if (n == null) return false;
+    final double dotHandle =
+        n[0] * _rDir[0] + n[1] * _rDir[1] + n[2] * _rDir[2];
+    return dotHandle.abs() < 0.5; // handle axis should lie in the face plane
+  }
+
+  /// Set the face normal directly (restored from storage, or for log replay).
+  void setFaceNormal(double x, double y, double z) {
+    final double n = math.sqrt(x * x + y * y + z * z);
+    if (n < 1e-6) return;
+    _faceNormal = [x / n, y / n, z / n];
+  }
 
   void reset() {
     calibrating = false;
@@ -72,12 +107,18 @@ class MotionEstimator {
     _vel[0] = _vel[1] = _vel[2] = 0;
     _restCount = 0;
     roll = pitch = tilt = speed = faceSpeed = 0;
+    faceSpeedPerp = faceSpeedPar = 0;
+    // Keep _faceNormal: it's a mounting constant that survives reconnects.
   }
 
-  /// Drift-free paddle-face speed |omega x r| (m/s) from bias-corrected gyro.
-  /// Independent of orientation/integration, so it's valid even uncalibrated
-  /// (bias is 0 then) and always returns to 0 at rest.
-  double _faceSpeed(double gx, double gy, double gz) {
+  /// Drift-free paddle-face speed |omega x r| and its closing/brushing split.
+  /// v = omega x r is the tip velocity in the board frame; projecting it onto
+  /// the face normal gives the closing (perpendicular-to-face) speed, and the
+  /// remainder is the brushing (parallel-to-face) speed — so
+  /// faceSpeed^2 = perp^2 + par^2. Uses only the gyro, so it's drift-free and
+  /// valid even uncalibrated (bias is 0 then). The split is only produced once a
+  /// face normal is available.
+  void _updateFaceSpeeds(double gx, double gy, double gz) {
     final double wx = (gx - _bias[0]) * _deg2rad;
     final double wy = (gy - _bias[1]) * _deg2rad;
     final double wz = (gz - _bias[2]) * _deg2rad;
@@ -87,7 +128,17 @@ class MotionEstimator {
     final double vx = wy * rz - wz * ry;
     final double vy = wz * rx - wx * rz;
     final double vz = wx * ry - wy * rx;
-    return math.sqrt(vx * vx + vy * vy + vz * vz);
+    final double v2 = vx * vx + vy * vy + vz * vz;
+    faceSpeed = math.sqrt(v2);
+    final n = _faceNormal;
+    if (n != null) {
+      final double perp = vx * n[0] + vy * n[1] + vz * n[2];
+      faceSpeedPerp = perp.abs();
+      faceSpeedPar = math.sqrt(math.max(0.0, v2 - perp * perp));
+    } else {
+      faceSpeedPerp = 0;
+      faceSpeedPar = 0;
+    }
   }
 
   void startCalibration() {
@@ -99,8 +150,15 @@ class MotionEstimator {
   }
 
   /// ax,ay,az in g; gx,gy,gz in deg/s. Call once per IMU sample.
-  void update(double ax, double ay, double az, double gx, double gy, double gz) {
-    faceSpeed = _faceSpeed(gx, gy, gz); // drift-free; valid regardless of state
+  void update(
+    double ax,
+    double ay,
+    double az,
+    double gx,
+    double gy,
+    double gz,
+  ) {
+    _updateFaceSpeeds(gx, gy, gz); // drift-free; valid regardless of state
     if (calibrating) {
       _sgx += gx;
       _sgy += gy;
@@ -144,9 +202,7 @@ class MotionEstimator {
     _q1 += dq1 * _dt;
     _q2 += dq2 * _dt;
     _q3 += dq3 * _dt;
-    final double qn = math.sqrt(
-      _q0 * _q0 + _q1 * _q1 + _q2 * _q2 + _q3 * _q3,
-    );
+    final double qn = math.sqrt(_q0 * _q0 + _q1 * _q1 + _q2 * _q2 + _q3 * _q3);
     if (qn > 1e-9) {
       _q0 /= qn;
       _q1 /= qn;
@@ -204,14 +260,12 @@ class MotionEstimator {
 
   void _finishCalibration() {
     final double inv = 1.0 / _calN;
-    initFromRest(
-      _sax * inv,
-      _say * inv,
-      _saz * inv,
-      _sgx * inv,
-      _sgy * inv,
-      _sgz * inv,
-    );
+    final double ax = _sax * inv, ay = _say * inv, az = _saz * inv;
+    // Face-up pose: gravity points along the paddle-face normal, so the mean
+    // accel direction IS the face normal in the board frame.
+    setFaceNormal(ax, ay, az);
+    initFromRest(ax, ay, az, _sgx * inv, _sgy * inv, _sgz * inv);
+    onCalibrated?.call();
   }
 
   /// Initialize directly from a known resting sample (mean accel in g, mean
@@ -262,15 +316,26 @@ class MotionEstimator {
 
 /// Result of replaying a recorded log through the estimator.
 class SpeedSeries {
-  final Float32List speed; // accel-integrated |velocity| per sample, m/s (drifts)
+  final Float32List
+  speed; // accel-integrated |velocity| per sample, m/s (drifts)
   final double maxSpeed;
   final Float32List faceSpeed; // |omega x r| per sample, m/s (drift-free)
   final double maxFaceSpeed;
+  final Float32List facePerp; // closing (perpendicular to face), m/s
+  final double maxFacePerp;
+  final Float32List facePar; // brushing (parallel to face), m/s
+  final double maxFacePar;
+  final bool hasComponents; // whether a face normal was supplied to split
   const SpeedSeries(
     this.speed,
     this.maxSpeed,
     this.faceSpeed,
     this.maxFaceSpeed,
+    this.facePerp,
+    this.maxFacePerp,
+    this.facePar,
+    this.maxFacePar,
+    this.hasComponents,
   );
 }
 
@@ -283,15 +348,32 @@ SpeedSeries computeSpeedSeries(
   List<Float32List> axes,
   int count, {
   double leverArmM = 0.12,
+  List<double>? faceNormal,
 }) {
   final speed = Float32List(count);
   final faceSpeed = Float32List(count);
+  final facePerp = Float32List(count);
+  final facePar = Float32List(count);
+  final bool hasComp = faceNormal != null && faceNormal.length >= 3;
   if (count == 0 || axes.length < 6) {
-    return SpeedSeries(speed, 0, faceSpeed, 0);
+    return SpeedSeries(
+      speed,
+      0,
+      faceSpeed,
+      0,
+      facePerp,
+      0,
+      facePar,
+      0,
+      hasComp,
+    );
   }
 
   final m = MotionEstimator();
   m.leverArmM = leverArmM;
+  // Supply the (persisted) mounting normal so the log can be split; the log's
+  // own start pose is not face-up, so the normal can't come from the log.
+  if (hasComp) m.setFaceNormal(faceNormal[0], faceNormal[1], faceNormal[2]);
   // Seed calibration from a short resting window at the start of the log.
   final int k = math.min(415, math.max(1, count ~/ 4)); // ~0.25 s at 1660 Hz
   double sax = 0, say = 0, saz = 0, sgx = 0, sgy = 0, sgz = 0;
@@ -313,7 +395,7 @@ SpeedSeries computeSpeedSeries(
     sgz * inv,
   );
 
-  double maxS = 0, maxF = 0;
+  double maxS = 0, maxF = 0, maxP = 0, maxA = 0;
   for (int i = 0; i < count; i++) {
     m.update(
       axes[0][i],
@@ -325,8 +407,22 @@ SpeedSeries computeSpeedSeries(
     );
     speed[i] = m.speed;
     faceSpeed[i] = m.faceSpeed;
+    facePerp[i] = m.faceSpeedPerp;
+    facePar[i] = m.faceSpeedPar;
     if (m.speed > maxS) maxS = m.speed;
     if (m.faceSpeed > maxF) maxF = m.faceSpeed;
+    if (m.faceSpeedPerp > maxP) maxP = m.faceSpeedPerp;
+    if (m.faceSpeedPar > maxA) maxA = m.faceSpeedPar;
   }
-  return SpeedSeries(speed, maxS, faceSpeed, maxF);
+  return SpeedSeries(
+    speed,
+    maxS,
+    faceSpeed,
+    maxF,
+    facePerp,
+    maxP,
+    facePar,
+    maxA,
+    hasComp,
+  );
 }
