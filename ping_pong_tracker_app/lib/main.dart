@@ -51,6 +51,7 @@ class SavedLog {
   final double durationSec;
   String name; // user label; empty => display falls back to "Log #id"
   final List<double> hitTimes; // detected ball-hit times (s, rebased to log)
+  final int droppedSamples; // samples lost to BLE drops during this capture
 
   SavedLog(
     this.id,
@@ -61,6 +62,7 @@ class SavedLog {
     this.durationSec, {
     this.name = "",
     this.hitTimes = const [],
+    this.droppedSamples = 0,
   });
 
   String get displayName => name.isEmpty ? "Log #$id" : name;
@@ -140,6 +142,19 @@ class _BLETestScreenState extends State<BLETestScreen>
   final Stopwatch _streamStopwatch = Stopwatch();
   int _lastStreamPacketUs = 0;
 
+  // ---- Chip-clock timestamping (firmware >= 1.1) ----
+  // The packet header carries the first sample's chip micros() + a cumulative
+  // sample index, so we reconstruct exact per-sample times and detect drops.
+  bool _haveChipRef = false;
+  int _chipBaseUs = 0; // absolute µs of this packet's first sample (from 0)
+  int _prevChipMicros = 0; // prev packet's first-sample chip micros (uint32)
+  int _prevChipIndex = 0; // prev packet's first-sample index (uint32)
+  int _prevChipN = 0; // prev packet's sample count
+  int _chipFirstIndex = 0; // session's first sample index (for the timeline)
+  double _lastChipTsec = 0; // last emitted chip time (s); monotonic guard
+  int _dropCount = 0; // total dropped samples this session
+  int _capDropStart = 0; // _dropCount snapshot when the current capture began
+
   // Ring buffer of recent samples (absolute stream time + 6 axes).
   Float64List? _ringT;
   List<Float32List>? _ringAxes;
@@ -174,6 +189,8 @@ class _BLETestScreenState extends State<BLETestScreen>
   static const String _kResetLogsKey = "resetLogsOnLeave";
   static const String _kHoverPersistKey = "hoverPersists";
   static const String _kHoverPosKey = "hoverReadoutPos";
+  static const String _kTimeMicrosKey = "timeMicros";
+  static const String _kTimeDecimalsKey = "timeDecimals";
   static const String _kFaceNormXKey = "faceNormalX";
   static const String _kFaceNormYKey = "faceNormalY";
   static const String _kFaceNormZKey = "faceNormalZ";
@@ -182,6 +199,8 @@ class _BLETestScreenState extends State<BLETestScreen>
   bool _resetLogsOnLeave = true; // leaving Logs tab returns to the list
   bool _hoverPersists = false; // graph hover readout stays after lifting finger
   HoverReadoutPos _hoverPos = HoverReadoutPos.follow; // hover readout side
+  bool _timeMicros = false; // show time in µs (else ms with _timeDecimals)
+  int _timeDecimals = 3; // ms decimal places (0-3) when not showing µs
   double _hitWindowSec = 1.0; // data captured before AND after each hit (s)
   double _manualTimeoutSec = 4.0; // manual logging auto-stop (0.1 - 5.0 s)
   double _hitThreshG = 0.5; // ball-hit vibration threshold (lower = sensitive)
@@ -285,6 +304,8 @@ class _BLETestScreenState extends State<BLETestScreen>
     final resetLogs = prefs.getBool(_kResetLogsKey);
     final hoverPersist = prefs.getBool(_kHoverPersistKey);
     final hoverPosStr = prefs.getString(_kHoverPosKey);
+    final timeMicros = prefs.getBool(_kTimeMicrosKey);
+    final timeDec = prefs.getInt(_kTimeDecimalsKey);
     final fnx = prefs.getDouble(_kFaceNormXKey);
     final fny = prefs.getDouble(_kFaceNormYKey);
     final fnz = prefs.getDouble(_kFaceNormZKey);
@@ -299,6 +320,8 @@ class _BLETestScreenState extends State<BLETestScreen>
           orElse: () => HoverReadoutPos.follow,
         );
       }
+      if (timeMicros != null) _timeMicros = timeMicros;
+      if (timeDec != null) _timeDecimals = timeDec.clamp(0, 3);
       if (win != null) _hitWindowSec = win.clamp(0.25, 2.0);
       if (timeout != null) _manualTimeoutSec = timeout.clamp(0.1, 5.0);
       if (hitThr != null) _hitThreshG = hitThr.clamp(0.1, 1.5);
@@ -333,7 +356,7 @@ class _BLETestScreenState extends State<BLETestScreen>
       final nameBytes = utf8.encode(log.name);
       final hits = log.hitTimes;
       final bd = ByteData(
-        4 + n * 8 + 6 * n * 4 + 4 + nameBytes.length + 4 + hits.length * 8,
+        4 + n * 8 + 6 * n * 4 + 4 + nameBytes.length + 4 + hits.length * 8 + 4,
       );
       int off = 0;
       bd.setInt32(off, n, Endian.little);
@@ -360,6 +383,12 @@ class _BLETestScreenState extends State<BLETestScreen>
         bd.setFloat64(off, h, Endian.little);
         off += 8;
       }
+      bd.setInt32(
+        off,
+        log.droppedSamples,
+        Endian.little,
+      ); // trailing, back-compat
+      off += 4;
       await _logFile(dir, log).writeAsBytes(u8, flush: true);
     } catch (_) {
       // best-effort; a failed persist just means it won't survive restart
@@ -419,6 +448,12 @@ class _BLETestScreenState extends State<BLETestScreen>
             }
           }
         }
+        // Optional trailing dropped-sample count (absent in older files).
+        int dropped = 0;
+        if (bytes.length >= off + 4) {
+          dropped = bd.getInt32(off, Endian.little);
+          off += 4;
+        }
         loaded.add(
           SavedLog(
             id,
@@ -429,6 +464,7 @@ class _BLETestScreenState extends State<BLETestScreen>
             t[n - 1],
             name: name,
             hitTimes: hitTimes,
+            droppedSamples: dropped,
           ),
         );
         if (id > maxId) maxId = id;
@@ -583,6 +619,10 @@ class _BLETestScreenState extends State<BLETestScreen>
     _ringLen = 0;
     _ringHead = 0;
     _lastStreamPacketUs = 0;
+    _haveChipRef = false;
+    _chipBaseUs = 0;
+    _lastChipTsec = 0;
+    _dropCount = 0;
     _hitDetector.reset();
     _recentHits.clear();
     _streamStopwatch
@@ -595,16 +635,27 @@ class _BLETestScreenState extends State<BLETestScreen>
     _charSubscription = char.onValueReceived.listen(_onPacket);
   }
 
-  // Batched binary packet:
-  //   byte 0 : sample count N
-  //   byte 1 : battery % (ignored)
-  //   then N * 12 bytes: int16 LE ax, ay, az, gx, gy, gz (raw counts)
+  // True if the connected firmware is at least major.minor (picks packet format).
+  bool _fwAtLeast(int major, int minor) {
+    final parts = _firmwareVersion.split('.');
+    if (parts.length < 2) return false;
+    final maj = int.tryParse(parts[0]) ?? 0;
+    final min = int.tryParse(parts[1]) ?? 0;
+    return maj > major || (maj == major && min >= minor);
+  }
+
+  // Batched binary packet. Firmware >= 1.1 uses a 10-byte header
+  //   [uint32 firstSampleIndex][uint32 firstSampleMicros][battery][N]
+  // older firmware uses a 2-byte header [N][battery]; then N*12 bytes of
+  // int16 LE ax, ay, az, gx, gy, gz (raw counts).
   void _onPacket(List<int> value) {
-    if (value.length < 2) return;
-    final int count = value[0];
-    if (count < 1 || value.length < 2 + count * 12) return;
-    _batteryPct = value[1].toString(); // byte 1 = battery %
+    final bool chipTime = _fwAtLeast(1, 1);
+    final int hdr = chipTime ? 10 : 2;
+    if (value.length < hdr) return;
     final bd = ByteData.view(Uint8List.fromList(value).buffer);
+    final int count = chipTime ? value[9] : value[0];
+    if (count < 1 || value.length < hdr + count * 12) return;
+    _batteryPct = (chipTime ? value[8] : value[1]).toString();
 
     final now = DateTime.now();
     _windowStart ??= now;
@@ -616,11 +667,41 @@ class _BLETestScreenState extends State<BLETestScreen>
       _windowStart = now;
     }
 
-    // Per-sample timestamps interpolated across the packet using the
-    // free-running clock, so ring/capture times are continuous regardless of
-    // whether we're currently recording.
+    // Packet time base. Firmware >= 1.1 gives exact chip timestamps: we rebuild
+    // an absolute µs timeline (wrap-safe) and detect dropped samples from a jump
+    // in the sample index. Older firmware falls back to interpolating the
+    // phone's free-running clock across the packet.
     final int prevUs = _lastStreamPacketUs;
     final int nowUs = _streamStopwatch.elapsedMicroseconds;
+    double baseIndex =
+        0; // this packet's first sample index (from session start)
+    double dtUs = 1e6 / _odrHz; // µs per sample used to space the timeline
+    if (chipTime) {
+      final int firstIndex = bd.getUint32(0, Endian.little);
+      final int firstMicros = bd.getUint32(4, Endian.little);
+      if (_haveChipRef) {
+        final int dMicros = (firstMicros - _prevChipMicros) & 0xFFFFFFFF;
+        _chipBaseUs += dMicros; // absolute µs of this packet's first sample
+        final int expected = (_prevChipIndex + _prevChipN) & 0xFFFFFFFF;
+        final int dropped = (firstIndex - expected) & 0xFFFFFFFF;
+        if (dropped > 0 && dropped < 100000) _dropCount += dropped;
+      } else {
+        _haveChipRef = true;
+        _chipBaseUs = 0;
+        _chipFirstIndex = firstIndex;
+      }
+      _prevChipMicros = firstMicros;
+      _prevChipIndex = firstIndex;
+      _prevChipN = count;
+      final int relFirst = (firstIndex - _chipFirstIndex) & 0xFFFFFFFF;
+      baseIndex = relFirst.toDouble();
+      // Space samples by index at the chip's LONG-baseline average rate (total
+      // µs / total samples), not a per-packet estimate: the per-packet micros
+      // stamp jitters, so extrapolating it overshoots the next packet and makes
+      // times run backwards. This is monotonic and drop-aware (an index gap
+      // becomes a time gap). Fall back to nominal ODR until the baseline is long.
+      dtUs = relFirst > 200 ? _chipBaseUs / relFirst : (1e6 / _odrHz);
+    }
 
     // Orientation/velocity fusion feeds only the live Connection-tab readouts,
     // so run its heavy per-sample math (trig + quaternion + matrix) only while
@@ -631,7 +712,7 @@ class _BLETestScreenState extends State<BLETestScreen>
 
     double ax = 0, ay = 0, az = 0, gx = 0, gy = 0, gz = 0;
     for (int s = 0; s < count; s++) {
-      final int b = 2 + s * 12;
+      final int b = hdr + s * 12;
       ax = bd.getInt16(b + 0, Endian.little) * _accelScaleG;
       ay = bd.getInt16(b + 2, Endian.little) * _accelScaleG;
       az = bd.getInt16(b + 4, Endian.little) * _accelScaleG;
@@ -642,7 +723,14 @@ class _BLETestScreenState extends State<BLETestScreen>
       // Run the fusion filter at the true per-sample rate (fixed ODR).
       if (liveTab) _motion.update(ax, ay, az, gx, gy, gz);
 
-      final double tSec = (prevUs + (nowUs - prevUs) * (s + 1) / count) / 1e6;
+      double tSec;
+      if (chipTime) {
+        tSec = (baseIndex + s) * dtUs / 1e6;
+        if (tSec < _lastChipTsec) tSec = _lastChipTsec; // guarantee monotonic
+        _lastChipTsec = tSec;
+      } else {
+        tSec = (prevUs + (nowUs - prevUs) * (s + 1) / count) / 1e6;
+      }
       final double amag = math.sqrt(ax * ax + ay * ay + az * az);
 
       // Ball-hit detection runs continuously; a hit both marks the log and (in
@@ -832,6 +920,7 @@ class _BLETestScreenState extends State<BLETestScreen>
     }
     _capCount = pre;
     _triggerSec = hitT;
+    _capDropStart = _dropCount;
     _recording = true;
   }
 
@@ -865,6 +954,7 @@ class _BLETestScreenState extends State<BLETestScreen>
         for (final h in _recentHits)
           if (h >= t0 && h <= tEnd) h - t0,
       ];
+      final int dropped = (_dropCount - _capDropStart).clamp(0, 1 << 30);
       final created = SavedLog(
         ++_logSeq,
         DateTime.now(),
@@ -873,6 +963,7 @@ class _BLETestScreenState extends State<BLETestScreen>
         n,
         t[n - 1],
         hitTimes: hits,
+        droppedSamples: dropped,
       );
       _logs.insert(0, created);
       _prefs?.setInt(_kLogSeqKey, _logSeq); // remember the last issued number
@@ -910,6 +1001,7 @@ class _BLETestScreenState extends State<BLETestScreen>
     );
     setState(() {
       _capCount = 0;
+      _capDropStart = _dropCount;
       _isManualLogging = true;
     });
   }
@@ -1029,9 +1121,11 @@ class _BLETestScreenState extends State<BLETestScreen>
   }
 
   String _csvFor(SavedLog log) {
-    final sb = StringBuffer("time_s,ax_g,ay_g,az_g,gx_dps,gy_dps,gz_dps\n");
+    final sb = StringBuffer(
+      "$_timeColHeader,ax_g,ay_g,az_g,gx_dps,gy_dps,gz_dps\n",
+    );
     for (int i = 0; i < log.count; i++) {
-      sb.write(log.t[i].toStringAsFixed(4));
+      sb.write(_fmtTimeValue(log.t[i]));
       for (int a = 0; a < 6; a++) {
         sb.write(',');
         sb.write(log.axes[a][i].toStringAsFixed(a < 3 ? 4 : 2));
@@ -1113,6 +1207,21 @@ class _BLETestScreenState extends State<BLETestScreen>
       }
     }
   }
+
+  // Per-sample time (stored in seconds) formatted for display, per settings:
+  // microseconds (integer) or milliseconds with 0–3 decimals.
+  String _fmtTimeValue(double tSec) => _timeMicros
+      ? (tSec * 1e6).round().toString()
+      : (tSec * 1000).toStringAsFixed(_timeDecimals);
+  String _fmtTimeLabel(double tSec) =>
+      _timeMicros ? "${_fmtTimeValue(tSec)} µs" : "${_fmtTimeValue(tSec)} ms";
+  String get _timeColHeader => _timeMicros ? "time_us" : "time_ms";
+  int get _timeColWidth =>
+      _timeMicros ? 9 : (6 + (_timeDecimals > 0 ? _timeDecimals + 1 : 0));
+
+  String _fmtDateTime(DateTime d) =>
+      "${d.year}-${d.month.toString().padLeft(2, '0')}-"
+      "${d.day.toString().padLeft(2, '0')} ${_fmtTime(d)}";
 
   String _fmtTime(DateTime d) =>
       '${d.hour.toString().padLeft(2, '0')}:'
@@ -1261,6 +1370,14 @@ class _BLETestScreenState extends State<BLETestScreen>
             "Sample Rate: $_sampleRateStr Hz",
             style: const TextStyle(fontSize: 16, color: Colors.grey),
           ),
+          if (streaming && _fwAtLeast(1, 1))
+            Text(
+              "Dropped samples: $_dropCount",
+              style: TextStyle(
+                fontSize: 13,
+                color: _dropCount > 0 ? Colors.orange : Colors.grey,
+              ),
+            ),
           if (streaming) ...[
             const SizedBox(height: 10),
             _batteryIndicator(int.tryParse(_batteryPct) ?? 0),
@@ -1501,7 +1618,9 @@ class _BLETestScreenState extends State<BLETestScreen>
         ),
         child: Row(
           children: [
-            const Icon(Icons.show_chart, color: Colors.blueAccent),
+            log.droppedSamples > 0
+                ? const Icon(Icons.error, color: Colors.red)
+                : const Icon(Icons.show_chart, color: Colors.blueAccent),
             const SizedBox(width: 16),
             Expanded(
               child: Column(
@@ -1516,8 +1635,7 @@ class _BLETestScreenState extends State<BLETestScreen>
                   ),
                   const SizedBox(height: 2),
                   Text(
-                    "#${log.id}  •  ${_fmtTime(log.timestamp)}"
-                    "  •  ${log.durationSec.toStringAsFixed(1)} s",
+                    "#${log.id}  •  ${log.durationSec.toStringAsFixed(1)} s",
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
                     style: const TextStyle(fontSize: 13, color: Colors.black54),
@@ -1532,12 +1650,13 @@ class _BLETestScreenState extends State<BLETestScreen>
     );
   }
 
-  // Per-log overflow menu: rename / export / delete (compact dropdown).
+  // Per-log overflow menu: rename / details / export / delete (compact dropdown).
   Widget _logActionsMenu(SavedLog log) {
     return PopupMenuButton<String>(
       tooltip: "Actions",
       onSelected: (v) {
         if (v == 'rename') _renameLog(log);
+        if (v == 'details') _showLogDetails(log);
         if (v == 'export') _exportLog(log);
         if (v == 'delete') _deleteLog(log);
       },
@@ -1548,6 +1667,14 @@ class _BLETestScreenState extends State<BLETestScreen>
             dense: true,
             leading: Icon(Icons.edit_outlined),
             title: Text("Rename"),
+          ),
+        ),
+        PopupMenuItem(
+          value: 'details',
+          child: ListTile(
+            dense: true,
+            leading: Icon(Icons.info_outline),
+            title: Text("Details"),
           ),
         ),
         PopupMenuItem(
@@ -1567,6 +1694,77 @@ class _BLETestScreenState extends State<BLETestScreen>
           ),
         ),
       ],
+    );
+  }
+
+  // Read-only "Details" popup: name + number, plus recording metadata.
+  void _showLogDetails(SavedLog log) {
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Row(
+          crossAxisAlignment: CrossAxisAlignment.center,
+          children: [
+            Flexible(
+              child: Text(log.displayName, overflow: TextOverflow.ellipsis),
+            ),
+            const SizedBox(width: 8),
+            Text(
+              "#${log.id}",
+              style: const TextStyle(fontSize: 13, color: Colors.grey),
+            ),
+          ],
+        ),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            _detailRow("Recorded", _fmtDateTime(log.timestamp)),
+            _detailRow("Length", "${log.durationSec.toStringAsFixed(2)} s"),
+            _detailRow("Samples", "${log.count}"),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text("Close"),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _detailRow(String label, String value) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 4),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          SizedBox(
+            width: 92,
+            child: Text(label, style: const TextStyle(color: Colors.grey)),
+          ),
+          Expanded(child: Text(value)),
+        ],
+      ),
+    );
+  }
+
+  // Red "dropped N sample(s)" badge for a log that lost BLE data mid-capture.
+  Widget _dropBadge(int n) {
+    return Padding(
+      padding: const EdgeInsets.only(right: 4),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          const Icon(Icons.error, color: Colors.red, size: 18),
+          const SizedBox(width: 4),
+          Text(
+            "dropped $n sample${n == 1 ? '' : 's'}",
+            style: const TextStyle(color: Colors.red, fontSize: 12),
+          ),
+        ],
+      ),
     );
   }
 
@@ -1660,12 +1858,13 @@ class _BLETestScreenState extends State<BLETestScreen>
                 child: InkWell(
                   onTap: () => _renameLog(log),
                   child: Text(
-                    "${log.displayName}  •  ${log.count} samples  •  "
+                    "${log.displayName}  •  "
                     "${log.durationSec.toStringAsFixed(1)} s",
                     style: const TextStyle(fontWeight: FontWeight.bold),
                   ),
                 ),
               ),
+              if (log.droppedSamples > 0) _dropBadge(log.droppedSamples),
               _logActionsMenu(log),
             ],
           ),
@@ -1811,7 +2010,7 @@ class _BLETestScreenState extends State<BLETestScreen>
             overflow: TextOverflow.clip,
             style: const TextStyle(
               fontFamily: "monospace",
-              fontSize: 10,
+              fontSize: 9,
               fontWeight: FontWeight.bold,
             ),
           ),
@@ -1824,9 +2023,13 @@ class _BLETestScreenState extends State<BLETestScreen>
   // and each column matches its chart color.
   List<InlineSpan> _csvSpans(SavedLog log, int i) {
     return [
-      for (int c = 0; c < 7; c++)
+      TextSpan(
+        text: _fmtTimeValue(log.t[i]).padLeft(_timeColWidth),
+        style: TextStyle(color: _csvColColors[0]),
+      ),
+      for (int c = 1; c < 7; c++)
         TextSpan(
-          text: (c == 0 ? log.t[i] : log.axes[c - 1][i])
+          text: log.axes[c - 1][i]
               .toStringAsFixed(_csvColDecimals[c])
               .padLeft(_csvColWidth[c]),
           style: TextStyle(color: _csvColColors[c]),
@@ -1838,7 +2041,11 @@ class _BLETestScreenState extends State<BLETestScreen>
   // sits above its numbers.
   List<InlineSpan> _csvHeaderSpans() {
     return [
-      for (int c = 0; c < 7; c++)
+      TextSpan(
+        text: _timeColHeader.padLeft(_timeColWidth),
+        style: TextStyle(color: _csvColColors[0]),
+      ),
+      for (int c = 1; c < 7; c++)
         TextSpan(
           text: _csvColLabels[c].padLeft(_csvColWidth[c]),
           style: TextStyle(color: _csvColColors[c]),
@@ -1856,7 +2063,7 @@ class _BLETestScreenState extends State<BLETestScreen>
           maxLines: 1,
           softWrap: false,
           overflow: TextOverflow.clip,
-          style: const TextStyle(fontFamily: "monospace", fontSize: 10),
+          style: const TextStyle(fontFamily: "monospace", fontSize: 9),
         ),
       ),
     );
@@ -1902,6 +2109,7 @@ class _BLETestScreenState extends State<BLETestScreen>
               hitTimes: log.hitTimes,
               persist: _hoverPersists,
               pos: _hoverPos,
+              timeLabel: _fmtTimeLabel,
             ),
           ),
         ),
@@ -2024,6 +2232,47 @@ class _BLETestScreenState extends State<BLETestScreen>
             },
           ),
         ),
+        const Divider(height: 24),
+        SwitchListTile(
+          contentPadding: EdgeInsets.zero,
+          title: const Text(
+            "Display time in microseconds",
+            style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+          ),
+          subtitle: const Text(
+            "Off: show time in milliseconds with the decimals below.",
+          ),
+          value: _timeMicros,
+          onChanged: (v) {
+            setState(() => _timeMicros = v);
+            _prefs?.setBool(_kTimeMicrosKey, v);
+          },
+        ),
+        if (!_timeMicros) ...[
+          const SizedBox(height: 8),
+          const Text(
+            "Millisecond decimals",
+            style: TextStyle(fontSize: 14, color: Colors.grey),
+          ),
+          const SizedBox(height: 8),
+          Align(
+            alignment: Alignment.centerLeft,
+            child: SegmentedButton<int>(
+              showSelectedIcon: false,
+              segments: const [
+                ButtonSegment(value: 0, label: Text("0")),
+                ButtonSegment(value: 1, label: Text("1")),
+                ButtonSegment(value: 2, label: Text("2")),
+                ButtonSegment(value: 3, label: Text("3")),
+              ],
+              selected: {_timeDecimals},
+              onSelectionChanged: (s) {
+                setState(() => _timeDecimals = s.first);
+                _prefs?.setInt(_kTimeDecimalsKey, s.first);
+              },
+            ),
+          ),
+        ],
       ],
     );
   }
@@ -2476,6 +2725,7 @@ class _InteractiveChart extends StatefulWidget {
   final List<double> hitTimes;
   final bool persist; // keep the readout after the finger lifts
   final HoverReadoutPos pos; // which side the readout box sits on
+  final String Function(double) timeLabel; // formats a sample time for readout
 
   const _InteractiveChart({
     required this.t,
@@ -2491,6 +2741,7 @@ class _InteractiveChart extends StatefulWidget {
     required this.hitTimes,
     required this.persist,
     required this.pos,
+    required this.timeLabel,
   });
 
   @override
@@ -2575,7 +2826,7 @@ class _InteractiveChartState extends State<_InteractiveChart> {
     final bool showClose = widget.persist;
     final children = <Widget>[
       Text(
-        "t = ${widget.t[ti].toStringAsFixed(3)} s",
+        "t = ${widget.timeLabel(widget.t[ti])}",
         style: const TextStyle(
           fontSize: 11,
           fontWeight: FontWeight.bold,
@@ -2709,10 +2960,23 @@ class _RenameDialogState extends State<_RenameDialog> {
   late final TextEditingController _controller = TextEditingController(
     text: widget.initial,
   );
+  final FocusNode _focusNode = FocusNode();
+
+  @override
+  void initState() {
+    super.initState();
+    // `autofocus` alone is unreliable at raising the Android keyboard when a
+    // dialog opens (especially from a popup menu). Request focus once the
+    // dialog is actually on screen.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _focusNode.requestFocus();
+    });
+  }
 
   @override
   void dispose() {
     _controller.dispose();
+    _focusNode.dispose();
     super.dispose();
   }
 
@@ -2722,6 +2986,7 @@ class _RenameDialogState extends State<_RenameDialog> {
       title: const Text("Rename log"),
       content: TextField(
         controller: _controller,
+        focusNode: _focusNode,
         autofocus: true,
         textInputAction: TextInputAction.done,
         decoration: InputDecoration(
