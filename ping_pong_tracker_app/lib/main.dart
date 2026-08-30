@@ -11,14 +11,12 @@ import 'package:share_plus/share_plus.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'motion_estimator.dart';
 import 'hit_detector.dart';
+import 'models/saved_log.dart';
+import 'widgets/interactive_chart.dart';
+import 'widgets/rename_dialog.dart';
 
 // App version, shown top-right. Bump on app changes (1.0, 1.1, ...).
 const String kAppVersion = "1.2";
-
-/// Where the value readout appears when hovering a graph.
-/// follow = tracks the hovered point; left/right = pinned corner;
-/// adaptive = opposite the finger.
-enum HoverReadoutPos { follow, left, right, adaptive }
 
 void main() {
   FlutterBluePlus.setLogLevel(LogLevel.info, color: true);
@@ -39,33 +37,6 @@ class PingPongTrackerApp extends StatelessWidget {
       home: const BLETestScreen(),
     );
   }
-}
-
-/// One finished logging session, held in memory (right-sized columnar arrays).
-class SavedLog {
-  final int id;
-  final DateTime timestamp;
-  final Float64List t; // seconds
-  final List<Float32List> axes; // ax, ay, az, gx, gy, gz
-  final int count;
-  final double durationSec;
-  String name; // user label; empty => display falls back to "Log #id"
-  final List<double> hitTimes; // detected ball-hit times (s, rebased to log)
-  final int droppedSamples; // samples lost to BLE drops during this capture
-
-  SavedLog(
-    this.id,
-    this.timestamp,
-    this.t,
-    this.axes,
-    this.count,
-    this.durationSec, {
-    this.name = "",
-    this.hitTimes = const [],
-    this.droppedSamples = 0,
-  });
-
-  String get displayName => name.isEmpty ? "Log #$id" : name;
 }
 
 class BLETestScreen extends StatefulWidget {
@@ -100,7 +71,14 @@ class _BLETestScreenState extends State<BLETestScreen>
   // ---- Live display ----
   List<String> _imuData = ["0.00", "0.00", "0.00", "0.00", "0.00", "0.00"];
   // Battery % from packet byte 1 (not accurate without a battery attached).
+  // Raw reading is jumpy (ADC noise + voltage sag during BLE TX), so we show a
+  // smoothed value that is clamped to never rise during a session (batteries
+  // only discharge; any bounce-up is noise). No deadband — it steps 1% at a
+  // time as the smoothed value crosses each integer.
   String _batteryPct = "--";
+  double _batterySmoothed = -1; // EMA of the raw byte (-1 = no reading yet)
+  int _batteryShown = -1; // displayed %, monotonically non-increasing
+  static const double _batteryAlpha = 0.02; // EMA weight (~0.6 s at ~80 pkt/s)
 
   // Orientation + velocity estimator (sensor fusion), fed every sample.
   final MotionEstimator _motion = MotionEstimator();
@@ -136,6 +114,9 @@ class _BLETestScreenState extends State<BLETestScreen>
   // button records straight into the capture buffer until stopped or a timeout.
   bool _isManualLogging = false;
   Timer? _autoStopTimer;
+  // Drives the Stop-button progress ring that fills over the auto-stop timeout.
+  DateTime? _manualLogStart;
+  Timer? _manualProgressTimer;
 
   // Free-running clock + last-packet time, for continuous per-sample timestamps
   // (kept running the whole session so ring/capture times are consistent).
@@ -501,6 +482,7 @@ class _BLETestScreenState extends State<BLETestScreen>
   void dispose() {
     _uiTimer?.cancel();
     _autoStopTimer?.cancel();
+    _manualProgressTimer?.cancel();
     _tabController.dispose();
     _detailScroll.dispose();
     _charSubscription?.cancel();
@@ -549,16 +531,48 @@ class _BLETestScreenState extends State<BLETestScreen>
   }
 
   void _connectToDevice(BluetoothDevice device) async {
-    setState(() {
-      _connectionStatus = "Connecting to PaddleTrack...";
-    });
+    // Android's direct connect intermittently fails with GATT_ERROR (status
+    // 133), leaving a half-open link. Retry a couple of times — disconnecting
+    // first to free the cached GATT client — before giving up with a clean
+    // message instead of dumping the raw platform exception.
+    const int maxAttempts = 3; // initial try + 2 retries
+    bool connected = false;
 
+    for (int attempt = 1; attempt <= maxAttempts; attempt++) {
+      setState(() {
+        _connectionStatus = attempt == 1
+            ? "Connecting to PaddleTrack..."
+            : "Connecting to PaddleTrack… (retry ${attempt - 1})";
+      });
+      try {
+        await device.connect(
+          license: License.nonprofit,
+          autoConnect: false,
+          mtu: null,
+        );
+        connected = true;
+        break;
+      } catch (_) {
+        // Clear the stale/half-open link, then back off before retrying.
+        try {
+          await device.disconnect();
+        } catch (_) {}
+        if (attempt < maxAttempts) {
+          await Future.delayed(const Duration(milliseconds: 600));
+        }
+      }
+    }
+
+    if (!connected) {
+      setState(() {
+        _connectionStatus = "Could not connect. Try again.";
+        _isConnecting = false;
+      });
+      return;
+    }
+
+    // Connected — negotiate the link, discover the service, and subscribe.
     try {
-      await device.connect(
-        license: License.nonprofit,
-        autoConnect: false,
-        mtu: null,
-      );
       _targetDevice = device;
 
       // Auto-clean up if the peripheral vanishes (powered off / out of range).
@@ -603,9 +617,14 @@ class _BLETestScreenState extends State<BLETestScreen>
           }
         }
       }
-    } catch (e) {
+      // Connected, but the expected UART service/characteristic wasn't found.
       setState(() {
-        _connectionStatus = "Connection Failed: $e";
+        _connectionStatus = "Could not connect. Try again.";
+        _isConnecting = false;
+      });
+    } catch (_) {
+      setState(() {
+        _connectionStatus = "Could not connect. Try again.";
         _isConnecting = false;
       });
     }
@@ -655,7 +674,7 @@ class _BLETestScreenState extends State<BLETestScreen>
     final bd = ByteData.view(Uint8List.fromList(value).buffer);
     final int count = chipTime ? value[9] : value[0];
     if (count < 1 || value.length < hdr + count * 12) return;
-    _batteryPct = (chipTime ? value[8] : value[1]).toString();
+    _updateBattery(chipTime ? value[8] : value[1]);
 
     final now = DateTime.now();
     _windowStart ??= now;
@@ -783,6 +802,23 @@ class _BLETestScreenState extends State<BLETestScreen>
     }
   }
 
+  // Smooth the jumpy raw battery byte and clamp the shown value so it only ever
+  // decreases within a session. Seeds on the first reading, then EMA + a
+  // non-increasing gate (no deadband, so it still steps down 1% at a time).
+  void _updateBattery(int raw) {
+    final double r = raw.clamp(0, 100).toDouble();
+    if (_batterySmoothed < 0) {
+      _batterySmoothed = r; // first reading seeds the filter
+      _batteryShown = r.round();
+    } else {
+      _batterySmoothed =
+          _batteryAlpha * r + (1 - _batteryAlpha) * _batterySmoothed;
+      final int cand = _batterySmoothed.round();
+      if (cand < _batteryShown) _batteryShown = cand; // never rise
+    }
+    _batteryPct = _batteryShown.toString();
+  }
+
   void _resetConnectionUi() {
     if (!mounted) return;
     setState(() {
@@ -793,6 +829,8 @@ class _BLETestScreenState extends State<BLETestScreen>
       _samplesInWindow = 0;
       _sampleRateStr = "0";
       _batteryPct = "--";
+      _batterySmoothed = -1; // fresh session -> re-seed the smoother
+      _batteryShown = -1;
       _firmwareVersion = "?";
       _imuData = ["0.00", "0.00", "0.00", "0.00", "0.00", "0.00"];
       _armed = false;
@@ -979,6 +1017,9 @@ class _BLETestScreenState extends State<BLETestScreen>
     setState(() {
       // Stop whichever mode was active before switching.
       _autoStopTimer?.cancel();
+      _manualProgressTimer?.cancel();
+      _manualProgressTimer = null;
+      _manualLogStart = null;
       if (_isManualLogging) {
         _isManualLogging = false;
         _finalizeCapture();
@@ -990,6 +1031,14 @@ class _BLETestScreenState extends State<BLETestScreen>
     _prefs?.setBool(_kAutoLoggingKey, enabled);
   }
 
+  // 0..1 fraction of the way to the manual auto-stop timeout (for the ring).
+  double get _manualProgress {
+    final start = _manualLogStart;
+    if (start == null || _manualTimeoutSec <= 0) return 0;
+    final elapsed = DateTime.now().difference(start).inMicroseconds / 1e6;
+    return (elapsed / _manualTimeoutSec).clamp(0.0, 1.0);
+  }
+
   void _startLogging() {
     _ensureCaptureBuffers();
     _autoStopTimer?.cancel();
@@ -999,6 +1048,19 @@ class _BLETestScreenState extends State<BLETestScreen>
         if (_isManualLogging) _stopLogging();
       },
     );
+    _manualLogStart = DateTime.now();
+    // Repaint the Stop button often enough that its progress ring sweeps
+    // smoothly toward the auto-stop timeout.
+    _manualProgressTimer?.cancel();
+    _manualProgressTimer = Timer.periodic(const Duration(milliseconds: 33), (
+      t,
+    ) {
+      if (!mounted || !_isManualLogging) {
+        t.cancel();
+        return;
+      }
+      setState(() {});
+    });
     setState(() {
       _capCount = 0;
       _capDropStart = _dropCount;
@@ -1008,6 +1070,9 @@ class _BLETestScreenState extends State<BLETestScreen>
 
   void _stopLogging() {
     _autoStopTimer?.cancel();
+    _manualProgressTimer?.cancel();
+    _manualProgressTimer = null;
+    _manualLogStart = null;
     setState(() {
       _isManualLogging = false;
       _finalizeCapture(); // snapshot + persist (times rebased to start at 0)
@@ -1108,8 +1173,7 @@ class _BLETestScreenState extends State<BLETestScreen>
   Future<void> _renameLog(SavedLog log) async {
     final result = await showDialog<String>(
       context: context,
-      builder: (ctx) =>
-          _RenameDialog(initial: log.name, hint: "Log #${log.id}"),
+      builder: (ctx) => RenameDialog(initial: log.name, hint: "Log #${log.id}"),
     );
     if (result == null || !mounted) return; // cancelled / navigated away
     final desired = result.trim();
@@ -1295,22 +1359,36 @@ class _BLETestScreenState extends State<BLETestScreen>
     );
   }
 
-  // Horizontal rectangular battery gauge with the percentage beside it.
+  // Compact iPhone-style battery gauge: percentage in front of a small
+  // horizontal cell. Fill and text are tinted by level for at-a-glance reading
+  // (a darker text shade keeps the number legible over the tab background).
   Widget _batteryIndicator(int pct) {
     final p = pct.clamp(0, 100);
     final Color fill = p <= 20
         ? Colors.red
         : (p <= 50 ? Colors.orange : Colors.green);
+    final Color textColor = p <= 20
+        ? Colors.red.shade700
+        : (p <= 50 ? Colors.orange.shade800 : Colors.green.shade700);
     return Row(
       mainAxisSize: MainAxisSize.min,
       children: [
+        Text(
+          "$p%",
+          style: TextStyle(
+            fontSize: 13,
+            fontWeight: FontWeight.bold,
+            color: textColor,
+          ),
+        ),
+        const SizedBox(width: 5),
         Container(
-          width: 46,
-          height: 20,
-          padding: const EdgeInsets.all(2),
+          width: 32,
+          height: 15,
+          padding: const EdgeInsets.all(1.5),
           decoration: BoxDecoration(
-            border: Border.all(color: Colors.black54, width: 1.5),
-            borderRadius: BorderRadius.circular(4),
+            border: Border.all(color: Colors.black54, width: 1.2),
+            borderRadius: BorderRadius.circular(3),
           ),
           child: FractionallySizedBox(
             alignment: Alignment.centerLeft,
@@ -1325,8 +1403,8 @@ class _BLETestScreenState extends State<BLETestScreen>
         ),
         // terminal nub
         Container(
-          width: 3,
-          height: 8,
+          width: 2.5,
+          height: 6,
           decoration: const BoxDecoration(
             color: Colors.black54,
             borderRadius: BorderRadius.only(
@@ -1334,11 +1412,6 @@ class _BLETestScreenState extends State<BLETestScreen>
               bottomRight: Radius.circular(2),
             ),
           ),
-        ),
-        const SizedBox(width: 8),
-        Text(
-          "$p%",
-          style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
         ),
       ],
     );
@@ -1370,14 +1443,6 @@ class _BLETestScreenState extends State<BLETestScreen>
             "Sample Rate: $_sampleRateStr Hz",
             style: const TextStyle(fontSize: 16, color: Colors.grey),
           ),
-          if (streaming && _fwAtLeast(1, 1))
-            Text(
-              "Dropped samples: $_dropCount",
-              style: TextStyle(
-                fontSize: 13,
-                color: _dropCount > 0 ? Colors.orange : Colors.grey,
-              ),
-            ),
           if (streaming) ...[
             const SizedBox(height: 10),
             _batteryIndicator(int.tryParse(_batteryPct) ?? 0),
@@ -1430,17 +1495,13 @@ class _BLETestScreenState extends State<BLETestScreen>
           OutlinedButton.icon(
             onPressed: (streaming && !m.calibrating) ? _calibrateMotion : null,
             icon: const Icon(Icons.explore),
-            label: Text(
-              m.hasFaceNormal
-                  ? "Recalibrate (forehand face up)"
-                  : "Calibrate (forehand face up)",
-            ),
+            label: const Text("Calibrate (forehand face up)"),
           ),
           if (m.hasFaceNormal && !m.faceNormalValid)
             const Padding(
               padding: EdgeInsets.only(top: 6),
               child: Text(
-                "Face-up pose looks off — recalibrate with the forehand face "
+                "Face-up pose looks off — calibrate with the forehand face "
                 "pointing straight up.",
                 textAlign: TextAlign.center,
                 style: TextStyle(fontSize: 12, color: Colors.orange),
@@ -1470,75 +1531,58 @@ class _BLETestScreenState extends State<BLETestScreen>
   // Arm/Disarm toggle for motion-triggered capture, or a manual Start/Stop.
   Widget _loggingControl(bool streaming) {
     if (_autoLoggingEnabled) {
-      return Column(
-        children: [
-          ElevatedButton.icon(
-            // Arm it, then any swing that crosses the accel threshold is
-            // recorded automatically. Only meaningful while streaming.
-            onPressed: streaming ? _toggleArmed : null,
-            style: ElevatedButton.styleFrom(
-              backgroundColor: _armed ? Colors.red : Colors.green,
-              foregroundColor: Colors.white,
-              padding: const EdgeInsets.symmetric(horizontal: 30, vertical: 14),
-            ),
-            icon: Icon(
-              _armed ? Icons.motion_photos_off : Icons.motion_photos_on,
-            ),
-            label: Text(
-              _armed ? "Disarm Auto-Capture" : "Arm Auto-Capture",
-              style: const TextStyle(fontSize: 16),
-            ),
-          ),
-          const SizedBox(height: 8),
-          Text(
-            _recording
-                ? "● Capturing hit… $_capCount samples"
-                : _armed
-                ? "Armed — a log is saved on each ball hit "
-                      "(±${_hitWindowSec.toStringAsFixed(2)} s)"
-                : (_logs.isNotEmpty
-                      ? "${_logs.length} log(s) saved — see Logs tab"
-                      : "Disarmed"),
-            style: TextStyle(
-              fontSize: 13,
-              color: _recording ? Colors.red : Colors.grey,
-            ),
-          ),
-        ],
+      // Arm it, then any swing that crosses the accel threshold is recorded
+      // automatically. Only meaningful while streaming.
+      return ElevatedButton.icon(
+        onPressed: streaming ? _toggleArmed : null,
+        style: ElevatedButton.styleFrom(
+          backgroundColor: _armed ? Colors.red : Colors.green,
+          foregroundColor: Colors.white,
+          padding: const EdgeInsets.symmetric(horizontal: 30, vertical: 14),
+        ),
+        icon: Icon(_armed ? Icons.motion_photos_off : Icons.motion_photos_on),
+        label: Text(
+          _armed ? "Disarm Auto-Capture" : "Arm Auto-Capture",
+          style: const TextStyle(fontSize: 16),
+        ),
       );
     }
-    // Manual mode: Start/Stop button (auto-stops after the timeout).
-    return Column(
-      children: [
-        ElevatedButton.icon(
-          onPressed: streaming
-              ? (_isManualLogging ? _stopLogging : _startLogging)
-              : null,
-          style: ElevatedButton.styleFrom(
-            backgroundColor: _isManualLogging ? Colors.red : Colors.green,
-            foregroundColor: Colors.white,
-            padding: const EdgeInsets.symmetric(horizontal: 30, vertical: 14),
-          ),
-          icon: Icon(_isManualLogging ? Icons.stop : Icons.fiber_manual_record),
-          label: Text(
-            _isManualLogging ? "Stop Logging" : "Start Logging",
-            style: const TextStyle(fontSize: 16),
-          ),
-        ),
-        const SizedBox(height: 8),
-        Text(
-          _isManualLogging
-              ? "Logging… $_capCount samples "
-                    "(auto-stops at ${_manualTimeoutSec.toStringAsFixed(1)} s)"
-              : (_logs.isNotEmpty
-                    ? "${_logs.length} log(s) saved — see Logs tab"
-                    : "Not logging"),
-          style: TextStyle(
-            fontSize: 13,
-            color: _isManualLogging ? Colors.red : Colors.grey,
-          ),
-        ),
-      ],
+    // Manual mode: Start/Stop button (auto-stops after the timeout). While
+    // logging, the icon is a square stop symbol wrapped in a ring that sweeps
+    // around as the auto-stop timeout approaches.
+    return ElevatedButton.icon(
+      onPressed: streaming
+          ? (_isManualLogging ? _stopLogging : _startLogging)
+          : null,
+      style: ElevatedButton.styleFrom(
+        backgroundColor: _isManualLogging ? Colors.red : Colors.green,
+        foregroundColor: Colors.white,
+        padding: const EdgeInsets.symmetric(horizontal: 30, vertical: 14),
+      ),
+      icon: _isManualLogging
+          ? SizedBox(
+              width: 22,
+              height: 22,
+              child: Stack(
+                alignment: Alignment.center,
+                children: [
+                  CircularProgressIndicator(
+                    value: _manualProgress,
+                    strokeWidth: 2.5,
+                    valueColor: const AlwaysStoppedAnimation<Color>(
+                      Colors.white,
+                    ),
+                    backgroundColor: Colors.white24,
+                  ),
+                  const Icon(Icons.stop, size: 11, color: Colors.white),
+                ],
+              ),
+            )
+          : const Icon(Icons.fiber_manual_record),
+      label: Text(
+        _isManualLogging ? "Stop Logging" : "Start Logging",
+        style: const TextStyle(fontSize: 16),
+      ),
     );
   }
 
@@ -2095,7 +2139,7 @@ class _BLETestScreenState extends State<BLETestScreen>
           height: 150,
           child: Padding(
             padding: const EdgeInsets.symmetric(horizontal: 8),
-            child: _InteractiveChart(
+            child: InteractiveChart(
               t: log.t,
               series: series,
               count: log.count,
@@ -2188,8 +2232,7 @@ class _BLETestScreenState extends State<BLETestScreen>
             style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
           ),
           subtitle: const Text(
-            "Keep the value readout on the graph after you lift your finger. "
-            "Off: it shows only while you're touching.",
+            "Keep the value readout on the graph after you lift your finger.",
           ),
           value: _hoverPersists,
           onChanged: (v) {
@@ -2204,8 +2247,7 @@ class _BLETestScreenState extends State<BLETestScreen>
         ),
         const SizedBox(height: 4),
         const Text(
-          "Where the value box sits when you hover a graph. Follow tracks the "
-          "point you're touching; Adaptive keeps it opposite your finger.",
+          "Where the value box sits when you hover a graph.",
           style: TextStyle(color: Colors.grey),
         ),
         const SizedBox(height: 8),
@@ -2238,9 +2280,6 @@ class _BLETestScreenState extends State<BLETestScreen>
           title: const Text(
             "Display time in microseconds",
             style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
-          ),
-          subtitle: const Text(
-            "Off: show time in milliseconds with the decimals below.",
           ),
           value: _timeMicros,
           onChanged: (v) {
@@ -2319,10 +2358,7 @@ class _BLETestScreenState extends State<BLETestScreen>
       ),
       const SizedBox(height: 4),
       const Text(
-        "Ball hits are found from the high-frequency vibration in the wood "
-        "(runs always). Lower threshold = more sensitive (catches weaker hits, "
-        "but risks false triggers on hard swings). Hits are marked on the log "
-        "graphs.",
+        "Lower threshold catches weaker hits, but risks false triggers.",
         style: TextStyle(color: Colors.grey),
       ),
       const SizedBox(height: 8),
@@ -2450,561 +2486,6 @@ class _BLETestScreenState extends State<BLETestScreen>
               style: const TextStyle(color: Colors.grey, fontSize: 12),
             ),
           ],
-        ),
-      ],
-    );
-  }
-}
-
-/// Dependency-free line chart: the given series plotted against a shared time
-/// axis, with an auto-scaled y-axis covering just those series.
-class _ChartPainter extends CustomPainter {
-  final Float64List t;
-  final List<Float32List> series;
-  final int count;
-  final List<Color> colors;
-  final double? forcedMin; // if set, pin the y-axis bottom here (no auto-scale)
-  final String? cornerText; // optional label drawn in the top-right corner
-  final bool centerZero; // if true, y-axis is symmetric about 0 (0 centered)
-  final List<double> hitTimes; // detected ball-hit times (s) -> vertical lines
-  final int? touchIndex; // sample under the finger -> crosshair + dots
-
-  // Plot insets, shared with _InteractiveChart so a touch x maps to the same
-  // axis the painter draws.
-  static const double padL = 46, padR = 10, padT = 10, padB = 22;
-
-  _ChartPainter(
-    this.t,
-    this.series,
-    this.count,
-    this.colors, {
-    this.forcedMin,
-    this.cornerText,
-    this.centerZero = false,
-    this.hitTimes = const [],
-    this.touchIndex,
-  });
-
-  @override
-  void paint(Canvas canvas, Size size) {
-    canvas.drawRect(
-      Offset.zero & size,
-      Paint()..color = const Color(0xFFFAFAFA),
-    );
-
-    final plot = Rect.fromLTRB(
-      padL,
-      padT,
-      size.width - padR,
-      size.height - padB,
-    );
-    canvas.drawRect(
-      plot,
-      Paint()
-        ..style = PaintingStyle.stroke
-        ..color = Colors.black26
-        ..strokeWidth = 1,
-    );
-
-    if (count < 2 || series.isEmpty) {
-      _text(
-        canvas,
-        "No data",
-        plot.center - const Offset(24, 8),
-        Colors.black45,
-      );
-      return;
-    }
-
-    double tMin = t[0];
-    double tMax = t[count - 1];
-    if (tMax <= tMin) tMax = tMin + 1e-3;
-
-    const int maxPts = 800;
-    final int step = (count / maxPts).ceil().clamp(1, count);
-
-    double vMin = double.infinity, vMax = -double.infinity;
-    for (int a = 0; a < series.length; a++) {
-      final col = series[a];
-      for (int i = 0; i < count; i += step) {
-        final v = col[i];
-        if (v < vMin) vMin = v;
-        if (v > vMax) vMax = v;
-      }
-    }
-    if (!vMin.isFinite || !vMax.isFinite) {
-      vMin = -1;
-      vMax = 1;
-    }
-    if (forcedMin != null) {
-      // Pin the bottom (e.g. 0 for speed); only pad/auto-scale the top.
-      vMin = forcedMin!;
-      if (vMax <= vMin) vMax = vMin + 1;
-      vMax += (vMax - vMin) * 0.08;
-    } else if (centerZero) {
-      // Symmetric about 0 so 0.0 sits exactly in the middle; autoscale extent.
-      final double av = vMin.abs(), bv = vMax.abs();
-      double mag = av > bv ? av : bv;
-      if (mag <= 0) mag = 1;
-      mag *= 1.05; // padding
-      vMin = -mag;
-      vMax = mag;
-    } else {
-      if (vMax <= vMin) vMax = vMin + 1;
-      final vpad = (vMax - vMin) * 0.05;
-      vMin -= vpad;
-      vMax += vpad;
-    }
-
-    double xOf(double tt) =>
-        plot.left + (tt - tMin) / (tMax - tMin) * plot.width;
-    double yOf(double vv) =>
-        plot.bottom - (vv - vMin) / (vMax - vMin) * plot.height;
-
-    final gridPaint = Paint()
-      ..color = Colors.black12
-      ..strokeWidth = 1;
-
-    void hline(double v) {
-      final y = yOf(v);
-      canvas.drawLine(Offset(plot.left, y), Offset(plot.right, y), gridPaint);
-      _text(
-        canvas,
-        v.toStringAsFixed(v.abs() < 10 ? 1 : 0),
-        Offset(2, y - 6),
-        Colors.black54,
-        size: 9,
-      );
-    }
-
-    // Horizontal grid lines with value labels (4 even divisions).
-    for (int k = 0; k <= 4; k++) {
-      hline(vMin + (vMax - vMin) * k / 4);
-    }
-    // Emphasize the zero line when the range crosses it.
-    if (vMin < 0 && vMax > 0) {
-      final y = yOf(0);
-      canvas.drawLine(
-        Offset(plot.left, y),
-        Offset(plot.right, y),
-        Paint()
-          ..color = Colors.black38
-          ..strokeWidth = 1,
-      );
-    }
-
-    for (int k = 0; k <= 4; k++) {
-      final tt = tMin + (tMax - tMin) * k / 4;
-      final x = xOf(tt);
-      canvas.drawLine(Offset(x, plot.top), Offset(x, plot.bottom), gridPaint);
-      _text(
-        canvas,
-        tt.toStringAsFixed(1),
-        Offset(x - 8, plot.bottom + 4),
-        Colors.black54,
-        size: 9,
-      );
-    }
-
-    for (int a = 0; a < series.length; a++) {
-      final col = series[a];
-      final paint = Paint()
-        ..color = colors[a]
-        ..strokeWidth = 1.2
-        ..style = PaintingStyle.stroke
-        ..isAntiAlias = true;
-      final path = Path();
-      bool first = true;
-      for (int i = 0; i < count; i += step) {
-        final x = xOf(t[i]);
-        final y = yOf(col[i]);
-        if (first) {
-          path.moveTo(x, y);
-          first = false;
-        } else {
-          path.lineTo(x, y);
-        }
-      }
-      canvas.drawPath(path, paint);
-    }
-
-    // Ball-hit markers: a clear vertical line at each detected hit time.
-    if (hitTimes.isNotEmpty) {
-      final hitPaint = Paint()
-        ..color =
-            const Color(0xFFE91E63) // magenta — distinct from all traces
-        ..strokeWidth = 2.0
-        ..isAntiAlias = true;
-      for (final ht in hitTimes) {
-        if (ht < tMin || ht > tMax) continue;
-        final x = xOf(ht);
-        canvas.drawLine(Offset(x, plot.top), Offset(x, plot.bottom), hitPaint);
-      }
-    }
-
-    // Touch crosshair + a dot on each trace at the hovered sample.
-    if (touchIndex != null && touchIndex! >= 0 && touchIndex! < count) {
-      final int ti = touchIndex!;
-      final double cx = xOf(t[ti]);
-      canvas.drawLine(
-        Offset(cx, plot.top),
-        Offset(cx, plot.bottom),
-        Paint()
-          ..color = Colors.black54
-          ..strokeWidth = 1,
-      );
-      for (int a = 0; a < series.length; a++) {
-        final double cy = yOf(series[a][ti]);
-        canvas.drawCircle(Offset(cx, cy), 3.5, Paint()..color = colors[a]);
-        canvas.drawCircle(
-          Offset(cx, cy),
-          3.5,
-          Paint()
-            ..style = PaintingStyle.stroke
-            ..color = Colors.white
-            ..strokeWidth = 1.2,
-        );
-      }
-    }
-
-    // Optional corner label (e.g. max speed), top-right inside the plot.
-    if (cornerText != null) {
-      final tp = TextPainter(
-        text: TextSpan(
-          text: cornerText,
-          style: const TextStyle(
-            color: Colors.black87,
-            fontSize: 12,
-            fontWeight: FontWeight.bold,
-          ),
-        ),
-        textDirection: TextDirection.ltr,
-      )..layout();
-      tp.paint(canvas, Offset(plot.right - tp.width - 6, plot.top + 4));
-    }
-  }
-
-  void _text(Canvas c, String s, Offset o, Color color, {double size = 10}) {
-    final tp = TextPainter(
-      text: TextSpan(
-        text: s,
-        style: TextStyle(color: color, fontSize: size),
-      ),
-      textDirection: TextDirection.ltr,
-    )..layout();
-    tp.paint(c, o);
-  }
-
-  @override
-  bool shouldRepaint(covariant _ChartPainter old) =>
-      old.count != count ||
-      old.t != t ||
-      old.colors != colors ||
-      old.forcedMin != forcedMin ||
-      old.cornerText != cornerText ||
-      old.centerZero != centerZero ||
-      old.hitTimes != hitTimes ||
-      old.touchIndex != touchIndex;
-}
-
-/// Wraps a [_ChartPainter] with touch tracking: dragging horizontally (or
-/// pressing and holding) shows a crosshair at the nearest sample plus a readout
-/// of the exact value(s). Vertical drags fall through to the enclosing scroll
-/// view, so the detail page still scrolls normally.
-class _InteractiveChart extends StatefulWidget {
-  final Float64List t;
-  final List<Float32List> series;
-  final int count;
-  final List<Color> colors;
-  final List<String>? labels;
-  final String unit;
-  final int decimals;
-  final double? forcedMin;
-  final String? cornerText;
-  final bool centerZero;
-  final List<double> hitTimes;
-  final bool persist; // keep the readout after the finger lifts
-  final HoverReadoutPos pos; // which side the readout box sits on
-  final String Function(double) timeLabel; // formats a sample time for readout
-
-  const _InteractiveChart({
-    required this.t,
-    required this.series,
-    required this.count,
-    required this.colors,
-    required this.labels,
-    required this.unit,
-    required this.decimals,
-    required this.forcedMin,
-    required this.cornerText,
-    required this.centerZero,
-    required this.hitTimes,
-    required this.persist,
-    required this.pos,
-    required this.timeLabel,
-  });
-
-  @override
-  State<_InteractiveChart> createState() => _InteractiveChartState();
-}
-
-class _InteractiveChartState extends State<_InteractiveChart> {
-  int? _touchIndex;
-
-  // Map an x within the plot to the nearest sample index (samples are ~uniform).
-  void _updateFromX(double dx, double width) {
-    final int n = widget.count;
-    if (n < 2) return;
-    final double plotLeft = _ChartPainter.padL;
-    final double plotW = width - _ChartPainter.padR - plotLeft;
-    if (plotW <= 0) return;
-    final double frac = ((dx - plotLeft) / plotW).clamp(0.0, 1.0);
-    final int idx = (frac * (n - 1)).round().clamp(0, n - 1);
-    if (idx != _touchIndex) setState(() => _touchIndex = idx);
-  }
-
-  void _clear() {
-    if (_touchIndex != null) setState(() => _touchIndex = null);
-  }
-
-  // On finger-lift: keep the readout when "persist" is on, else clear it.
-  void _onEnd() {
-    if (!widget.persist) _clear();
-  }
-
-  @override
-  void didUpdateWidget(_InteractiveChart old) {
-    super.didUpdateWidget(old);
-    // Turning persist off drops any pinned crosshair on the next rebuild.
-    if (old.persist && !widget.persist) _touchIndex = null;
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return LayoutBuilder(
-      builder: (context, constraints) {
-        final double width = constraints.maxWidth;
-        return GestureDetector(
-          behavior: HitTestBehavior.opaque,
-          // Horizontal drag = scrub; long-press = pin. Vertical drags are left
-          // to the scroll view (neither recognizer claims them).
-          onHorizontalDragStart: (d) => _updateFromX(d.localPosition.dx, width),
-          onHorizontalDragUpdate: (d) =>
-              _updateFromX(d.localPosition.dx, width),
-          onHorizontalDragEnd: (_) => _onEnd(),
-          onHorizontalDragCancel: _onEnd,
-          onLongPressStart: (d) => _updateFromX(d.localPosition.dx, width),
-          onLongPressMoveUpdate: (d) => _updateFromX(d.localPosition.dx, width),
-          onLongPressEnd: (_) => _onEnd(),
-          child: Stack(
-            children: [
-              CustomPaint(
-                painter: _ChartPainter(
-                  widget.t,
-                  widget.series,
-                  widget.count,
-                  widget.colors,
-                  forcedMin: widget.forcedMin,
-                  cornerText: widget.cornerText,
-                  centerZero: widget.centerZero,
-                  hitTimes: widget.hitTimes,
-                  touchIndex: _touchIndex,
-                ),
-                child: const SizedBox.expand(),
-              ),
-              if (_touchIndex != null) _readout(width),
-            ],
-          ),
-        );
-      },
-    );
-  }
-
-  Widget _readout(double width) {
-    final int ti = _touchIndex!;
-    // A dismiss control only makes sense for a pinned (persistent) readout.
-    final bool showClose = widget.persist;
-    final children = <Widget>[
-      Text(
-        "t = ${widget.timeLabel(widget.t[ti])}",
-        style: const TextStyle(
-          fontSize: 11,
-          fontWeight: FontWeight.bold,
-          color: Colors.black87,
-        ),
-      ),
-      for (int a = 0; a < widget.series.length; a++)
-        Text(
-          "${_label(a)}: "
-          "${widget.series[a][ti].toStringAsFixed(widget.decimals)}"
-          "${widget.unit.isEmpty ? "" : " ${widget.unit}"}",
-          style: TextStyle(
-            fontSize: 11,
-            fontWeight: FontWeight.w600,
-            color: widget.colors[a],
-          ),
-        ),
-    ];
-    final Widget box = Stack(
-      clipBehavior: Clip.none,
-      children: [
-        // The box passes touches through, so you can keep scrubbing under it…
-        IgnorePointer(
-          child: Container(
-            // Reserve room on the right for the close button so it never sits
-            // over a value.
-            padding: EdgeInsets.fromLTRB(8, 6, showClose ? 26 : 8, 6),
-            decoration: BoxDecoration(
-              color: const Color(0xF2FFFFFF),
-              borderRadius: BorderRadius.circular(6),
-              border: Border.all(color: Colors.black26),
-            ),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: children,
-            ),
-          ),
-        ),
-        // …except the close button, which stays tappable to clear the pin.
-        if (showClose)
-          Positioned(
-            top: 2,
-            right: 2,
-            child: Material(
-              color: Colors.black54,
-              shape: const CircleBorder(),
-              child: InkWell(
-                customBorder: const CircleBorder(),
-                onTap: _clear,
-                child: const Padding(
-                  padding: EdgeInsets.all(2),
-                  child: Icon(Icons.close, size: 14, color: Colors.white),
-                ),
-              ),
-            ),
-          ),
-      ],
-    );
-
-    // Follow mode: the box tracks the crosshair's x, centered above it and
-    // clamped to the chart by Align (it never runs off either edge).
-    if (widget.pos == HoverReadoutPos.follow) {
-      final double tMin = widget.t[0];
-      final double tMax = widget.count > 1
-          ? widget.t[widget.count - 1]
-          : tMin + 1e-3;
-      final double denom = (tMax - tMin).abs() < 1e-9 ? 1e-3 : (tMax - tMin);
-      final double plotLeft = _ChartPainter.padL;
-      final double plotW = width - _ChartPainter.padR - plotLeft;
-      double alignX = 0;
-      if (plotW > 0) {
-        final double cx =
-            plotLeft + ((widget.t[ti] - tMin) / denom).clamp(0.0, 1.0) * plotW;
-        alignX = ((cx / width) * 2 - 1).clamp(-1.0, 1.0);
-      }
-      return Positioned(
-        top: 6,
-        left: 0,
-        right: 0,
-        child: Align(alignment: Alignment(alignX, -1), child: box),
-      );
-    }
-
-    // Fixed corner (left/right) or adaptive (opposite the finger).
-    final bool boxOnLeft;
-    switch (widget.pos) {
-      case HoverReadoutPos.left:
-        boxOnLeft = true;
-        break;
-      case HoverReadoutPos.right:
-        boxOnLeft = false;
-        break;
-      case HoverReadoutPos.adaptive:
-        final double frac = widget.count > 1 ? ti / (widget.count - 1) : 0.0;
-        boxOnLeft = frac >= 0.5; // finger on the right -> box on the left
-        break;
-      case HoverReadoutPos.follow:
-        boxOnLeft = false; // handled above
-        break;
-    }
-    return Positioned(
-      top: 6,
-      left: boxOnLeft ? 6 : null,
-      right: boxOnLeft ? null : 6,
-      child: box,
-    );
-  }
-
-  String _label(int a) {
-    final labels = widget.labels;
-    if (labels != null && a < labels.length) return labels[a];
-    return "v$a";
-  }
-}
-
-/// Rename dialog that owns its text controller, so the controller is disposed
-/// only when the dialog's element is (after the dismiss animation finishes) —
-/// disposing it in the caller's async gap would crash the still-animating
-/// TextField ("controller used after being disposed").
-class _RenameDialog extends StatefulWidget {
-  final String initial;
-  final String hint;
-  const _RenameDialog({required this.initial, required this.hint});
-
-  @override
-  State<_RenameDialog> createState() => _RenameDialogState();
-}
-
-class _RenameDialogState extends State<_RenameDialog> {
-  late final TextEditingController _controller = TextEditingController(
-    text: widget.initial,
-  );
-  final FocusNode _focusNode = FocusNode();
-
-  @override
-  void initState() {
-    super.initState();
-    // `autofocus` alone is unreliable at raising the Android keyboard when a
-    // dialog opens (especially from a popup menu). Request focus once the
-    // dialog is actually on screen.
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (mounted) _focusNode.requestFocus();
-    });
-  }
-
-  @override
-  void dispose() {
-    _controller.dispose();
-    _focusNode.dispose();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return AlertDialog(
-      title: const Text("Rename log"),
-      content: TextField(
-        controller: _controller,
-        focusNode: _focusNode,
-        autofocus: true,
-        textInputAction: TextInputAction.done,
-        decoration: InputDecoration(
-          // Show the default "Log #id" faded in the field until a name is typed.
-          hintText: widget.hint,
-          hintStyle: TextStyle(color: Colors.grey.shade400),
-          labelText: "Name (blank to clear)",
-        ),
-        onSubmitted: (v) => Navigator.pop(context, v),
-      ),
-      actions: [
-        TextButton(
-          onPressed: () => Navigator.pop(context),
-          child: const Text("Cancel"),
-        ),
-        TextButton(
-          onPressed: () => Navigator.pop(context, _controller.text),
-          child: const Text("Save"),
         ),
       ],
     );
