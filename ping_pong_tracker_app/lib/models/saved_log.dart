@@ -11,6 +11,10 @@ class SavedLog {
   String name; // user label; empty => display falls back to "Log #id"
   final List<double> hitTimes; // detected ball-hit times (s, rebased to log)
   final int droppedSamples; // samples lost to BLE drops during this capture
+  // Face normal (board frame) from the calibration active when this log was
+  // captured. Kept per-log so the ⟂/∥ split is stable — recalibrating later
+  // doesn't rewrite old logs. Null for logs recorded before this was stored.
+  final List<double>? faceNormal;
 
   SavedLog(
     this.id,
@@ -22,6 +26,7 @@ class SavedLog {
     this.name = "",
     this.hitTimes = const [],
     this.droppedSamples = 0,
+    this.faceNormal,
   });
 
   String get displayName => name.isEmpty ? "Log #$id" : name;

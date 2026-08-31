@@ -25,7 +25,7 @@ const uint8_t UART_TX_UUID[16] = {
   0x93, 0xF3, 0xA3, 0xB5, 0x03, 0x00, 0x40, 0x6E};
 // Firmware version string, exposed as a READ characteristic (UUID ...0004...)
 // so the app can show it on connect. Bump on firmware changes (1.0, 1.1, ...).
-#define FW_VERSION "1.0"
+#define FW_VERSION "1.1"
 const uint8_t UART_VER_UUID[16] = {
   0x9E, 0xCA, 0xDC, 0x24, 0x0E, 0xE5, 0xA9, 0xE0,
   0x93, 0xF3, 0xA3, 0xB5, 0x04, 0x00, 0x40, 0x6E};
@@ -35,17 +35,25 @@ BLECharacteristic txChar(UART_TX_UUID);
 BLECharacteristic verChar(UART_VER_UUID);
 
 // =====================================================
-// Batched notification buffer
-//   byte 0 : number of samples in this packet
-//   byte 1 : battery %
+// Batched notification buffer (firmware v1.1 packet)
+//   bytes 0..3 : uint32 LE  first-sample index (cumulative; resets on connect)
+//   bytes 4..7 : uint32 LE  first-sample timestamp = micros() from the chip
+//   byte  8    : battery %
+//   byte  9    : number of samples N in this packet
 //   then N * 12 bytes: int16 LE  ax, ay, az, gx, gy, gz  (raw sensor counts)
-// The app applies the LSM6DS3 sensitivities (accel +/-16g, gyro 2000 dps).
+// The 10-byte header lets the app reconstruct exact per-sample times from the
+// chip clock and detect dropped samples (a jump in the index). The app applies
+// the LSM6DS3 sensitivities (accel +/-16g, gyro 2000 dps).
 // =====================================================
-#define MAX_SAMPLES   20              // 2 + 20*12 = 242 bytes, fits a 247-byte MTU
+#define PKT_HEADER    10
+#define MAX_SAMPLES   19              // 10 + 19*12 = 238 bytes, fits a 247-byte MTU
 #define SAMPLE_BYTES  12
-static uint8_t  txbuf[2 + MAX_SAMPLES * SAMPLE_BYTES];
+static uint8_t  txbuf[PKT_HEADER + MAX_SAMPLES * SAMPLE_BYTES];
 static uint16_t sampleCount = 0;
 static uint32_t lastFlushMs = 0;
+static uint32_t sampleIndexTotal = 0;  // cumulative samples since connect
+static uint32_t packetFirstIndex = 0;  // index of this packet's first sample
+static uint32_t packetFirstMicros = 0; // micros() of this packet's first sample
 
 volatile bool connected = false;
 int      batteryPct  = 100;
@@ -58,6 +66,7 @@ void connectCallback(uint16_t connHandle) {
   conn->requestDataLengthUpdate();        // BLE data length extension
   conn->requestMtuExchange(247);          // large MTU -> big batched packets
   conn->requestConnectionParameter(6);    // 6 * 1.25 ms = 7.5 ms interval
+  sampleIndexTotal = 0;                    // restart the sample counter per link
   connected = true;
   Serial.println("Central connected");
 }
@@ -158,18 +167,23 @@ void loop() {
   if ((status & 0x01) && sampleCount < MAX_SAMPLES) {   // XLDA: fresh accel data
     uint8_t raw[12];
     if (myIMU.readRegisterRegion(raw, LSM6DS3_OUTX_L_G, 12) == 0) {
+      if (sampleCount == 0) {                 // stamp this packet's first sample
+        packetFirstMicros = micros();
+        packetFirstIndex  = sampleIndexTotal;
+      }
       // burst layout is gyro(0..5) then accel(6..11); repack accel-first
-      uint16_t off = 2 + sampleCount * SAMPLE_BYTES;
+      uint16_t off = PKT_HEADER + sampleCount * SAMPLE_BYTES;
       memcpy(&txbuf[off + 0], &raw[6], 6);   // ax, ay, az
       memcpy(&txbuf[off + 6], &raw[0], 6);   // gx, gy, gz
       sampleCount++;
+      sampleIndexTotal++;
     }
   }
 
   // ---- Flush a batched notification when full or after a short latency cap ----
   BLEConnection* conn = Bluefruit.Connection(0);
   uint16_t mtu = conn ? conn->getMtu() : 23;
-  uint16_t cap = (mtu > 5) ? ((mtu - 3 - 2) / SAMPLE_BYTES) : 1;
+  uint16_t cap = (mtu > 5) ? ((mtu - 3 - PKT_HEADER) / SAMPLE_BYTES) : 1;
   if (cap > MAX_SAMPLES) cap = MAX_SAMPLES;
   if (cap < 1) cap = 1;
 
@@ -177,9 +191,11 @@ void loop() {
   bool full    = sampleCount >= cap;
   bool timeout = sampleCount > 0 && (nowMs - lastFlushMs >= 15);
   if (full || timeout) {
-    txbuf[0] = (uint8_t)sampleCount;
-    txbuf[1] = (uint8_t)batteryPct;
-    uint16_t len = 2 + sampleCount * SAMPLE_BYTES;
+    memcpy(&txbuf[0], &packetFirstIndex, 4);   // uint32 LE first-sample index
+    memcpy(&txbuf[4], &packetFirstMicros, 4);  // uint32 LE first-sample micros
+    txbuf[8] = (uint8_t)batteryPct;
+    txbuf[9] = (uint8_t)sampleCount;
+    uint16_t len = PKT_HEADER + sampleCount * SAMPLE_BYTES;
     if (txChar.notify(txbuf, len)) {
       sampleCount = 0;
       lastFlushMs = nowMs;

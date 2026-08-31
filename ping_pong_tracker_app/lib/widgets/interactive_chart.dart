@@ -15,6 +15,7 @@ class _ChartPainter extends CustomPainter {
   final int count;
   final List<Color> colors;
   final double? forcedMin; // if set, pin the y-axis bottom here (no auto-scale)
+  final double? forcedMax; // if set, hard-cap the y-axis top here (no padding)
   final String? cornerText; // optional label drawn in the top-right corner
   final bool centerZero; // if true, y-axis is symmetric about 0 (0 centered)
   final List<double> hitTimes; // detected ball-hit times (s) -> vertical lines
@@ -30,6 +31,7 @@ class _ChartPainter extends CustomPainter {
     this.count,
     this.colors, {
     this.forcedMin,
+    this.forcedMax,
     this.cornerText,
     this.centerZero = false,
     this.hitTimes = const [],
@@ -87,11 +89,13 @@ class _ChartPainter extends CustomPainter {
       vMin = -1;
       vMax = 1;
     }
-    if (forcedMin != null) {
-      // Pin the bottom (e.g. 0 for speed); only pad/auto-scale the top.
-      vMin = forcedMin!;
+    if (forcedMin != null || forcedMax != null) {
+      // Pin either/both bounds. A pinned top is a hard cap (no extra padding);
+      // an auto top still gets a little headroom.
+      if (forcedMin != null) vMin = forcedMin!;
+      if (forcedMax != null) vMax = forcedMax!;
       if (vMax <= vMin) vMax = vMin + 1;
-      vMax += (vMax - vMin) * 0.08;
+      if (forcedMax == null) vMax += (vMax - vMin) * 0.08;
     } else if (centerZero) {
       // Symmetric about 0 so 0.0 sits exactly in the middle; autoscale extent.
       final double av = vMin.abs(), bv = vMax.abs();
@@ -252,6 +256,7 @@ class _ChartPainter extends CustomPainter {
       old.t != t ||
       old.colors != colors ||
       old.forcedMin != forcedMin ||
+      old.forcedMax != forcedMax ||
       old.cornerText != cornerText ||
       old.centerZero != centerZero ||
       old.hitTimes != hitTimes ||
@@ -271,6 +276,7 @@ class InteractiveChart extends StatefulWidget {
   final String unit;
   final int decimals;
   final double? forcedMin;
+  final double? forcedMax;
   final String? cornerText;
   final bool centerZero;
   final List<double> hitTimes;
@@ -288,6 +294,7 @@ class InteractiveChart extends StatefulWidget {
     required this.unit,
     required this.decimals,
     required this.forcedMin,
+    this.forcedMax,
     required this.cornerText,
     required this.centerZero,
     required this.hitTimes,
@@ -357,6 +364,7 @@ class _InteractiveChartState extends State<InteractiveChart> {
                   widget.count,
                   widget.colors,
                   forcedMin: widget.forcedMin,
+                  forcedMax: widget.forcedMax,
                   cornerText: widget.cornerText,
                   centerZero: widget.centerZero,
                   hitTimes: widget.hitTimes,

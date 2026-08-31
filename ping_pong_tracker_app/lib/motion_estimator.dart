@@ -38,7 +38,7 @@ class MotionEstimator {
   // dominated). r points sensor->tip along the handle, so omega x r excludes
   // the twist/spin component and keeps the swing.
   static const List<double> _rDir = [0.0, 0.0, 1.0]; // board +Z -> paddle tip
-  double leverArmM = 0.12; // sensor -> face-center distance (m)
+  double leverArmM = 0.185; // sensor -> face-center distance (m), fixed mount
 
   bool calibrating = false;
   bool calibrated = false;
@@ -47,6 +47,11 @@ class MotionEstimator {
   double _q0 = 1, _q1 = 0, _q2 = 0, _q3 = 0;
   final List<double> _bias = [0, 0, 0]; // gyro bias (deg/s)
   final List<double> _vel = [0, 0, 0]; // world velocity (m/s)
+  // Gravity-removed acceleration in the world frame (m/s^2), updated each
+  // sample — the raw input to velocity integration, exposed for offline
+  // drift-correction experiments.
+  final List<double> _linAccWorld = [0, 0, 0];
+  List<double> get linAccWorld => _linAccWorld;
   int _restCount = 0;
 
   // Calibration accumulators
@@ -234,6 +239,9 @@ class MotionEstimator {
     final double fwy = r10 * fx + r11 * fy + r12 * fz;
     final double fwz = r20 * fx + r21 * fy + r22 * fz;
     // at rest f_world = (0,0,+g); subtract gravity to get linear accel
+    _linAccWorld[0] = fwx;
+    _linAccWorld[1] = fwy;
+    _linAccWorld[2] = fwz - _g;
     _vel[0] += fwx * _dt;
     _vel[1] += fwy * _dt;
     _vel[2] += (fwz - _g) * _dt;
@@ -317,8 +325,12 @@ class MotionEstimator {
 /// Result of replaying a recorded log through the estimator.
 class SpeedSeries {
   final Float32List
-  speed; // accel-integrated |velocity| per sample, m/s (drifts)
+  speed; // accel-integrated |velocity| per sample, m/s (raw, drifts)
   final double maxSpeed;
+  // Drift-corrected swing speed: the integrated velocity high-passed to strip
+  // the slow drift ramp, leaving the transient swing. This is the good one.
+  final Float32List swingSpeed;
+  final double maxSwingSpeed;
   final Float32List faceSpeed; // |omega x r| per sample, m/s (drift-free)
   final double maxFaceSpeed;
   final Float32List facePerp; // closing (perpendicular to face), m/s
@@ -329,6 +341,8 @@ class SpeedSeries {
   const SpeedSeries(
     this.speed,
     this.maxSpeed,
+    this.swingSpeed,
+    this.maxSwingSpeed,
     this.faceSpeed,
     this.maxFaceSpeed,
     this.facePerp,
@@ -347,10 +361,12 @@ class SpeedSeries {
 SpeedSeries computeSpeedSeries(
   List<Float32List> axes,
   int count, {
-  double leverArmM = 0.12,
+  double leverArmM = 0.185,
+  double swingHpSec = 0.35,
   List<double>? faceNormal,
 }) {
   final speed = Float32List(count);
+  final swingSpeed = Float32List(count);
   final faceSpeed = Float32List(count);
   final facePerp = Float32List(count);
   final facePar = Float32List(count);
@@ -358,6 +374,8 @@ SpeedSeries computeSpeedSeries(
   if (count == 0 || axes.length < 6) {
     return SpeedSeries(
       speed,
+      0,
+      swingSpeed,
       0,
       faceSpeed,
       0,
@@ -395,6 +413,12 @@ SpeedSeries computeSpeedSeries(
     sgz * inv,
   );
 
+  // Gravity-removed world acceleration per sample, kept for the swing-speed
+  // integration below (the estimator's own `speed` still drifts).
+  final lax = Float64List(count);
+  final lay = Float64List(count);
+  final laz = Float64List(count);
+
   double maxS = 0, maxF = 0, maxP = 0, maxA = 0;
   for (int i = 0; i < count; i++) {
     m.update(
@@ -406,6 +430,10 @@ SpeedSeries computeSpeedSeries(
       axes[5][i],
     );
     speed[i] = m.speed;
+    final la = m.linAccWorld;
+    lax[i] = la[0];
+    lay[i] = la[1];
+    laz[i] = la[2];
     faceSpeed[i] = m.faceSpeed;
     facePerp[i] = m.faceSpeedPerp;
     facePar[i] = m.faceSpeedPar;
@@ -414,9 +442,47 @@ SpeedSeries computeSpeedSeries(
     if (m.faceSpeedPerp > maxP) maxP = m.faceSpeedPerp;
     if (m.faceSpeedPar > maxA) maxA = m.faceSpeedPar;
   }
+
+  // Swing speed: integrate the world accel to velocity, then remove the slow
+  // drift by subtracting a centered moving-average baseline (a high-pass). The
+  // drift is near-DC; the swing is a fast transient, so this keeps the swing
+  // and discards the ramp. Acausal, but fine — the whole log is in hand.
+  const double dt = 1.0 / 1660.0;
+  final vx = Float64List(count);
+  final vy = Float64List(count);
+  final vz = Float64List(count);
+  for (int i = 1; i < count; i++) {
+    vx[i] = vx[i - 1] + 0.5 * (lax[i] + lax[i - 1]) * dt;
+    vy[i] = vy[i - 1] + 0.5 * (lay[i] + lay[i - 1]) * dt;
+    vz[i] = vz[i - 1] + 0.5 * (laz[i] + laz[i - 1]) * dt;
+  }
+  final px = Float64List(count + 1);
+  final py = Float64List(count + 1);
+  final pz = Float64List(count + 1);
+  for (int i = 0; i < count; i++) {
+    px[i + 1] = px[i] + vx[i];
+    py[i + 1] = py[i] + vy[i];
+    pz[i + 1] = pz[i] + vz[i];
+  }
+  final int hw = (swingHpSec / dt).round().clamp(1, count);
+  double maxSw = 0;
+  for (int i = 0; i < count; i++) {
+    final int lo = i - hw < 0 ? 0 : i - hw;
+    final int hi = i + hw + 1 > count ? count : i + hw + 1;
+    final int cnt = hi - lo;
+    final double dvx = vx[i] - (px[hi] - px[lo]) / cnt;
+    final double dvy = vy[i] - (py[hi] - py[lo]) / cnt;
+    final double dvz = vz[i] - (pz[hi] - pz[lo]) / cnt;
+    final double s = math.sqrt(dvx * dvx + dvy * dvy + dvz * dvz);
+    swingSpeed[i] = s;
+    if (s > maxSw) maxSw = s;
+  }
+
   return SpeedSeries(
     speed,
     maxS,
+    swingSpeed,
+    maxSw,
     faceSpeed,
     maxF,
     facePerp,
