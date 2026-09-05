@@ -8,6 +8,7 @@ mixin _BleScreenCore
   BluetoothDevice? _targetDevice;
   StreamSubscription<List<int>>? _charSubscription;
   StreamSubscription<List<ScanResult>>? _scanResultsSubscription;
+  Timer? _scanTimeoutTimer; // gives up on scanning after a while
   StreamSubscription<BluetoothConnectionState>? _connStateSub;
   String _connectionStatus = "Disconnected";
   bool _isConnecting = false;
@@ -129,9 +130,15 @@ mixin _BleScreenCore
   double _manualTimeoutSec = 4.0; // manual logging auto-stop (0.1 - 5.0 s)
   double _hitThreshG = 0.5; // ball-hit vibration threshold (lower = sensitive)
   double _swingHpSec = 0.35; // swing-speed high-pass window (0.2 - 0.7 s)
+  double _minScaleMps = 5.0; // min top of the speed-graph y-axis (0 = off)
+  bool _showAccelGraph = true; // show the raw accelerometer graph in log detail
+  bool _showGyroGraph = true; // show the raw gyroscope graph in log detail
   // Paddle-face normal in the board frame from the last face-up calibration
   // (persisted). Used live and to split recorded logs into closing/brushing.
   List<double>? _faceNormal;
+  // Calibrated sensor->tip direction (board frame) from the "tip up" pose,
+  // persisted. Sets the ω×r direction for the true face speed. Null = default.
+  List<double>? _leverDir;
   SharedPreferences? _prefs;
 
   // Accelerometer and gyroscope are drawn on separate, independently-scaled
@@ -155,6 +162,7 @@ mixin _BleScreenCore
     _detailScroll.addListener(_onDetailScroll);
     _logsScroll.addListener(_onLogsScroll);
     _motion.onCalibrated = _onMotionCalibrated;
+    _motion.onLeverCalibrated = _onLeverCalibrated;
     _loadSettings();
     _loadLogs();
   }
@@ -198,6 +206,9 @@ mixin _BleScreenCore
     final timeout = prefs.getDouble(_kManualTimeoutKey);
     final hitThr = prefs.getDouble(_kHitThreshKey);
     final swingHp = prefs.getDouble(_kSwingHpKey);
+    final minScale = prefs.getDouble(_kMinScaleKey);
+    final showAccel = prefs.getBool(_kShowAccelKey);
+    final showGyro = prefs.getBool(_kShowGyroKey);
     final resetLogs = prefs.getBool(_kResetLogsKey);
     final hoverPersist = prefs.getBool(_kHoverPersistKey);
     final hoverPosStr = prefs.getString(_kHoverPosKey);
@@ -206,6 +217,9 @@ mixin _BleScreenCore
     final fnx = prefs.getDouble(_kFaceNormXKey);
     final fny = prefs.getDouble(_kFaceNormYKey);
     final fnz = prefs.getDouble(_kFaceNormZKey);
+    final ldx = prefs.getDouble(_kLeverDirXKey);
+    final ldy = prefs.getDouble(_kLeverDirYKey);
+    final ldz = prefs.getDouble(_kLeverDirZKey);
     if (!mounted) return;
     setState(() {
       if (autoLog != null) _autoLoggingEnabled = autoLog;
@@ -223,9 +237,16 @@ mixin _BleScreenCore
       if (timeout != null) _manualTimeoutSec = timeout.clamp(0.1, 5.0);
       if (hitThr != null) _hitThreshG = hitThr.clamp(0.1, 1.5);
       if (swingHp != null) _swingHpSec = swingHp.clamp(0.2, 0.7);
+      if (minScale != null) _minScaleMps = minScale.clamp(0.0, 20.0);
+      if (showAccel != null) _showAccelGraph = showAccel;
+      if (showGyro != null) _showGyroGraph = showGyro;
       if (fnx != null && fny != null && fnz != null) {
         _faceNormal = [fnx, fny, fnz];
         _motion.setFaceNormal(fnx, fny, fnz);
+      }
+      if (ldx != null && ldy != null && ldz != null) {
+        _leverDir = [ldx, ldy, ldz];
+        _motion.setLeverDir(ldx, ldy, ldz);
       }
       _hitDetector.threshold = _hitThreshG;
       _motion.leverArmM = kLeverArmM;
@@ -434,6 +455,7 @@ mixin _BleScreenCore
     _uiTimer?.cancel();
     _autoStopTimer?.cancel();
     _manualProgressTimer?.cancel();
+    _scanTimeoutTimer?.cancel();
     _tabController.dispose();
     _detailScroll.dispose();
     _logsScroll.dispose();
@@ -461,25 +483,63 @@ mixin _BleScreenCore
       return;
     }
 
-    await FlutterBluePlus.startScan(
-      timeout: const Duration(seconds: 5),
-      androidUsesFineLocation: true,
-    );
-
+    // Subscribe BEFORE scanning so a result that arrives during the scan isn't
+    // missed. (Previously the listener was attached only after an awaited
+    // startScan that doesn't return until scanning has already stopped, so the
+    // paddle was never seen — turning it on mid-scan never connected and it
+    // hung on "Scanning…" forever.)
+    // One shared latch so the "found" path and the timeout path can't both run
+    // when the paddle appears right at the deadline (which showed "Could not
+    // connect" and THEN "Streaming Data"). Whichever fires first sets it
+    // synchronously before any await, so the other becomes a no-op.
+    bool resolved = false;
     await _scanResultsSubscription?.cancel();
     _scanResultsSubscription = FlutterBluePlus.scanResults.listen((
       results,
     ) async {
-      for (ScanResult r in results) {
+      if (resolved) return;
+      for (final r in results) {
         if (r.device.platformName == targetDeviceName) {
+          resolved = true;
+          _scanTimeoutTimer?.cancel();
           await _scanResultsSubscription?.cancel();
+          _scanResultsSubscription = null;
           await FlutterBluePlus.stopScan();
           await Future.delayed(const Duration(milliseconds: 500));
           _connectToDevice(r.device);
-          break;
+          return;
         }
       }
     });
+
+    // Scan for a fixed window; because we're already listening, turning the
+    // paddle on any time during it connects. If it never shows, give up cleanly
+    // with an error instead of hanging.
+    const scanWindow = Duration(seconds: 10);
+    _scanTimeoutTimer?.cancel();
+    _scanTimeoutTimer = Timer(scanWindow, () async {
+      if (resolved) return;
+      resolved = true;
+      await _scanResultsSubscription?.cancel();
+      _scanResultsSubscription = null;
+      await FlutterBluePlus.stopScan();
+      if (mounted) {
+        setState(() {
+          _connectionStatus = "Could not connect to paddle.";
+          _isConnecting = false;
+        });
+      }
+    });
+
+    try {
+      await FlutterBluePlus.startScan(
+        timeout: scanWindow,
+        androidUsesFineLocation: true,
+      );
+    } catch (_) {
+      // startScan can throw if BLE is momentarily unavailable; the timeout
+      // timer surfaces the failure to the user.
+    }
   }
 
   void _connectToDevice(BluetoothDevice device) async {
@@ -489,6 +549,13 @@ mixin _BleScreenCore
     // message instead of dumping the raw platform exception.
     const int maxAttempts = 3; // initial try + 2 retries
     bool connected = false;
+
+    // Clear any stale/half-open GATT client up front — after the board is
+    // power-cycled Android often still holds the old link, and the first
+    // connect would otherwise stall on it until the timeout.
+    try {
+      await device.disconnect();
+    } catch (_) {}
 
     for (int attempt = 1; attempt <= maxAttempts; attempt++) {
       setState(() {
@@ -501,6 +568,9 @@ mixin _BleScreenCore
           license: License.nonprofit,
           autoConnect: false,
           mtu: null,
+          // Fail fast instead of waiting out the ~35 s default, so retries are
+          // quick.
+          timeout: const Duration(seconds: 6),
         );
         connected = true;
         break;
@@ -510,7 +580,7 @@ mixin _BleScreenCore
           await device.disconnect();
         } catch (_) {}
         if (attempt < maxAttempts) {
-          await Future.delayed(const Duration(milliseconds: 600));
+          await Future.delayed(const Duration(milliseconds: 400));
         }
       }
     }
@@ -730,8 +800,10 @@ mixin _BleScreenCore
   // User-initiated disconnect.
   void _disconnect() async {
     _finalizeInFlight();
+    _scanTimeoutTimer?.cancel();
     await _charSubscription?.cancel();
     await _scanResultsSubscription?.cancel();
+    await FlutterBluePlus.stopScan(); // stop an in-progress scan, if any
     await _connStateSub?.cancel();
     await _targetDevice?.disconnect();
     _resetConnectionUi();
@@ -772,6 +844,7 @@ mixin _BleScreenCore
   }
 
   void _resetConnectionUi() {
+    _scanTimeoutTimer?.cancel();
     if (!mounted) return;
     setState(() {
       _targetDevice = null;
@@ -800,8 +873,28 @@ mixin _BleScreenCore
     });
   }
 
-  void _calibrateMotion() {
-    setState(() => _motion.startCalibration());
+  // Open the full-screen two-step calibration wizard (face-up, then tip-up).
+  void _openCalibration() {
+    final streaming = _connectionStatus == "Streaming Data";
+    Navigator.of(context).push(
+      MaterialPageRoute(
+        fullscreenDialog: true,
+        builder: (_) =>
+            CalibrationWizard(motion: _motion, canCalibrate: streaming),
+      ),
+    );
+  }
+
+  // Called when a "tip up" lever calibration completes: persist the measured
+  // sensor->tip direction and recompute open logs at the new ω×r direction.
+  void _onLeverCalibrated() {
+    final d = _motion.leverDir;
+    _leverDir = d;
+    _prefs?.setDouble(_kLeverDirXKey, d[0]);
+    _prefs?.setDouble(_kLeverDirYKey, d[1]);
+    _prefs?.setDouble(_kLeverDirZKey, d[2]);
+    _speedCache.clear(); // ω×r direction changed -> recompute
+    if (mounted) setState(() {});
   }
 
   // Called when a live face-up calibration completes: persist the captured face

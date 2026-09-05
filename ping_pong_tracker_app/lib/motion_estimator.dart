@@ -37,11 +37,15 @@ class MotionEstimator {
   // Handle axis = board Z (confirmed by a pure handle-twist capture: gz
   // dominated). r points sensor->tip along the handle, so omega x r excludes
   // the twist/spin component and keeps the swing.
-  static const List<double> _rDir = [0.0, 0.0, 1.0]; // board +Z -> paddle tip
+  // sensor -> paddle-tip direction in the board frame. Defaults to board +Z
+  // (empirically ~right: a pure handle twist showed up on gz), but can be
+  // measured directly by a "tip up" calibration to correct the mounting tilt.
+  List<double> _rDir = [0.0, 0.0, 1.0];
   double leverArmM = 0.185; // sensor -> face-center distance (m), fixed mount
 
   bool calibrating = false;
   bool calibrated = false;
+  bool calibratingLever = false; // "tip up" pose capture in progress
 
   // Orientation quaternion (body -> world, world +Z = up)
   double _q0 = 1, _q1 = 0, _q2 = 0, _q3 = 0;
@@ -52,11 +56,21 @@ class MotionEstimator {
   // drift-correction experiments.
   final List<double> _linAccWorld = [0, 0, 0];
   List<double> get linAccWorld => _linAccWorld;
+  // omega x r (face velocity from rotation) in the board frame and, after
+  // rotating by the current orientation, in the world frame — so it can be
+  // added to the world-frame translation velocity for a true face speed.
+  final List<double> _faceVelBody = [0, 0, 0];
+  final List<double> _faceVelWorld = [0, 0, 0];
+  List<double> get faceVelWorld => _faceVelWorld;
   int _restCount = 0;
 
   // Calibration accumulators
   int _calN = 0;
   double _sgx = 0, _sgy = 0, _sgz = 0, _sax = 0, _say = 0, _saz = 0;
+  // Lever ("tip up") calibration accumulators — accel only.
+  int _levN = 0;
+  double _lax = 0, _lay = 0, _laz = 0;
+  void Function()? onLeverCalibrated;
 
   // Outputs for display
   double roll = 0, pitch = 0, tilt = 0, speed = 0;
@@ -101,6 +115,46 @@ class MotionEstimator {
     _faceNormal = [x / n, y / n, z / n];
   }
 
+  // ---- Lever direction (sensor -> tip), for ω×r ----
+  List<double> get leverDir => List<double>.of(_rDir);
+
+  /// Tilt of the calibrated lever direction from the default board +Z, in
+  /// degrees — a "how far off is the mounting" readout (0 = perfectly aligned).
+  double get leverTiltDeg => math.acos(_rDir[2].clamp(-1.0, 1.0)) * _rad2deg;
+
+  /// Set the sensor->tip direction directly (restored from storage or replay).
+  void setLeverDir(double x, double y, double z) {
+    final double n = math.sqrt(x * x + y * y + z * z);
+    if (n < 1e-6) return;
+    _rDir = [x / n, y / n, z / n];
+  }
+
+  double get leverCalProgress =>
+      calibratingLever ? (_levN / _calTarget).clamp(0.0, 1.0) : 0.0;
+
+  /// Begin a "tip up" capture: hold the paddle with the tip pointing straight
+  /// up so gravity lies along the handle; the mean accel then IS the sensor->tip
+  /// direction in the board frame.
+  void startLeverCalibration() {
+    calibratingLever = true;
+    _levN = 0;
+    _lax = _lay = _laz = 0;
+  }
+
+  /// Abort any in-progress pose capture (e.g. the calibration wizard closed
+  /// before a step finished) so it doesn't silently complete later.
+  void cancelCalibration() {
+    calibrating = false;
+    calibratingLever = false;
+  }
+
+  void _finishLeverCalibration() {
+    final double inv = 1.0 / _levN;
+    setLeverDir(_lax * inv, _lay * inv, _laz * inv);
+    calibratingLever = false;
+    onLeverCalibrated?.call();
+  }
+
   void reset() {
     calibrating = false;
     calibrated = false;
@@ -133,6 +187,9 @@ class MotionEstimator {
     final double vx = wy * rz - wz * ry;
     final double vy = wz * rx - wx * rz;
     final double vz = wx * ry - wy * rx;
+    _faceVelBody[0] = vx;
+    _faceVelBody[1] = vy;
+    _faceVelBody[2] = vz;
     final double v2 = vx * vx + vy * vy + vz * vz;
     faceSpeed = math.sqrt(v2);
     final n = _faceNormal;
@@ -172,6 +229,13 @@ class MotionEstimator {
       _say += ay;
       _saz += az;
       if (++_calN >= _calTarget) _finishCalibration();
+      return;
+    }
+    if (calibratingLever) {
+      _lax += ax;
+      _lay += ay;
+      _laz += az;
+      if (++_levN >= _calTarget) _finishLeverCalibration();
       return;
     }
     if (!calibrated) return;
@@ -242,6 +306,13 @@ class MotionEstimator {
     _linAccWorld[0] = fwx;
     _linAccWorld[1] = fwy;
     _linAccWorld[2] = fwz - _g;
+    // Rotate omega x r (body frame) into the world frame with the same R.
+    _faceVelWorld[0] =
+        r00 * _faceVelBody[0] + r01 * _faceVelBody[1] + r02 * _faceVelBody[2];
+    _faceVelWorld[1] =
+        r10 * _faceVelBody[0] + r11 * _faceVelBody[1] + r12 * _faceVelBody[2];
+    _faceVelWorld[2] =
+        r20 * _faceVelBody[0] + r21 * _faceVelBody[1] + r22 * _faceVelBody[2];
     _vel[0] += fwx * _dt;
     _vel[1] += fwy * _dt;
     _vel[2] += (fwz - _g) * _dt;
@@ -331,6 +402,9 @@ class SpeedSeries {
   // the slow drift ramp, leaving the transient swing. This is the good one.
   final Float32List swingSpeed;
   final double maxSwingSpeed;
+  // True face speed: |v_sensor + omega x r| — swing translation plus rotation.
+  final Float32List trueFaceSpeed;
+  final double maxTrueFaceSpeed;
   final Float32List faceSpeed; // |omega x r| per sample, m/s (drift-free)
   final double maxFaceSpeed;
   final Float32List facePerp; // closing (perpendicular to face), m/s
@@ -343,6 +417,8 @@ class SpeedSeries {
     this.maxSpeed,
     this.swingSpeed,
     this.maxSwingSpeed,
+    this.trueFaceSpeed,
+    this.maxTrueFaceSpeed,
     this.faceSpeed,
     this.maxFaceSpeed,
     this.facePerp,
@@ -364,9 +440,11 @@ SpeedSeries computeSpeedSeries(
   double leverArmM = 0.185,
   double swingHpSec = 0.35,
   List<double>? faceNormal,
+  List<double>? leverDir,
 }) {
   final speed = Float32List(count);
   final swingSpeed = Float32List(count);
+  final trueFaceSpeed = Float32List(count);
   final faceSpeed = Float32List(count);
   final facePerp = Float32List(count);
   final facePar = Float32List(count);
@@ -376,6 +454,8 @@ SpeedSeries computeSpeedSeries(
       speed,
       0,
       swingSpeed,
+      0,
+      trueFaceSpeed,
       0,
       faceSpeed,
       0,
@@ -392,6 +472,10 @@ SpeedSeries computeSpeedSeries(
   // Supply the (persisted) mounting normal so the log can be split; the log's
   // own start pose is not face-up, so the normal can't come from the log.
   if (hasComp) m.setFaceNormal(faceNormal[0], faceNormal[1], faceNormal[2]);
+  // Supply the (persisted) calibrated sensor->tip direction, if any.
+  if (leverDir != null && leverDir.length >= 3) {
+    m.setLeverDir(leverDir[0], leverDir[1], leverDir[2]);
+  }
   // Seed calibration from a short resting window at the start of the log.
   final int k = math.min(415, math.max(1, count ~/ 4)); // ~0.25 s at 1660 Hz
   double sax = 0, say = 0, saz = 0, sgx = 0, sgy = 0, sgz = 0;
@@ -414,10 +498,14 @@ SpeedSeries computeSpeedSeries(
   );
 
   // Gravity-removed world acceleration per sample, kept for the swing-speed
-  // integration below (the estimator's own `speed` still drifts).
+  // integration below (the estimator's own `speed` still drifts). Also the
+  // world-frame omega x r, added to the swing velocity for a true face speed.
   final lax = Float64List(count);
   final lay = Float64List(count);
   final laz = Float64List(count);
+  final fvx = Float64List(count);
+  final fvy = Float64List(count);
+  final fvz = Float64List(count);
 
   double maxS = 0, maxF = 0, maxP = 0, maxA = 0;
   for (int i = 0; i < count; i++) {
@@ -434,6 +522,10 @@ SpeedSeries computeSpeedSeries(
     lax[i] = la[0];
     lay[i] = la[1];
     laz[i] = la[2];
+    final fv = m.faceVelWorld;
+    fvx[i] = fv[0];
+    fvy[i] = fv[1];
+    fvz[i] = fv[2];
     faceSpeed[i] = m.faceSpeed;
     facePerp[i] = m.faceSpeedPerp;
     facePar[i] = m.faceSpeedPar;
@@ -465,7 +557,7 @@ SpeedSeries computeSpeedSeries(
     pz[i + 1] = pz[i] + vz[i];
   }
   final int hw = (swingHpSec / dt).round().clamp(1, count);
-  double maxSw = 0;
+  double maxSw = 0, maxTf = 0;
   for (int i = 0; i < count; i++) {
     final int lo = i - hw < 0 ? 0 : i - hw;
     final int hi = i + hw + 1 > count ? count : i + hw + 1;
@@ -476,6 +568,13 @@ SpeedSeries computeSpeedSeries(
     final double s = math.sqrt(dvx * dvx + dvy * dvy + dvz * dvz);
     swingSpeed[i] = s;
     if (s > maxSw) maxSw = s;
+    // True face speed: swing translation + rotation, both in world frame.
+    final double tx = dvx + fvx[i];
+    final double ty = dvy + fvy[i];
+    final double tz = dvz + fvz[i];
+    final double tf = math.sqrt(tx * tx + ty * ty + tz * tz);
+    trueFaceSpeed[i] = tf;
+    if (tf > maxTf) maxTf = tf;
   }
 
   return SpeedSeries(
@@ -483,6 +582,8 @@ SpeedSeries computeSpeedSeries(
     maxS,
     swingSpeed,
     maxSw,
+    trueFaceSpeed,
+    maxTf,
     faceSpeed,
     maxF,
     facePerp,

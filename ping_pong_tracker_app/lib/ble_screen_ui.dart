@@ -3,6 +3,10 @@ part of 'main.dart';
 // All widget builders for the paddle screen (Connection / Logs / Settings
 // tabs, log detail, dialogs). State + logic live in ble_screen_core.dart.
 mixin _BleScreenUi on _BleScreenCore {
+  // Foreground colour of the top bar for the current theme (drives the tabs).
+  Color get _barFg =>
+      Theme.of(context).appBarTheme.foregroundColor ?? Colors.white;
+
   @override
   Widget build(BuildContext context) {
     return PopScope(
@@ -22,8 +26,8 @@ mixin _BleScreenUi on _BleScreenCore {
       child: Scaffold(
         appBar: AppBar(
           title: const Text('Paddle Prototype Bench'),
-          backgroundColor: Colors.blueAccent,
-          foregroundColor: Colors.white,
+          // Colours come from appBarTheme, so the bar follows the chosen theme
+          // (bright blue for Blue; adaptive grey for Gray).
           actions: [
             Center(
               child: Padding(
@@ -48,8 +52,9 @@ mixin _BleScreenUi on _BleScreenCore {
           ],
           bottom: TabBar(
             controller: _tabController,
-            labelColor: Colors.white,
-            indicatorColor: Colors.white,
+            labelColor: _barFg,
+            indicatorColor: _barFg,
+            unselectedLabelColor: _barFg.withAlpha(150),
             tabs: const [
               Tab(icon: Icon(Icons.bluetooth), text: "Connection"),
               Tab(icon: Icon(Icons.show_chart), text: "Logs"),
@@ -80,6 +85,7 @@ mixin _BleScreenUi on _BleScreenCore {
     final Color textColor = p <= 20
         ? Colors.red.shade700
         : (p <= 50 ? Colors.orange.shade800 : Colors.green.shade700);
+    final Color outline = Theme.of(context).colorScheme.onSurfaceVariant;
     return Row(
       mainAxisSize: MainAxisSize.min,
       children: [
@@ -97,7 +103,7 @@ mixin _BleScreenUi on _BleScreenCore {
           height: 15,
           padding: const EdgeInsets.all(1.5),
           decoration: BoxDecoration(
-            border: Border.all(color: Colors.black54, width: 1.2),
+            border: Border.all(color: outline, width: 1.2),
             borderRadius: BorderRadius.circular(3),
           ),
           child: FractionallySizedBox(
@@ -115,9 +121,9 @@ mixin _BleScreenUi on _BleScreenCore {
         Container(
           width: 2.5,
           height: 6,
-          decoration: const BoxDecoration(
-            color: Colors.black54,
-            borderRadius: BorderRadius.only(
+          decoration: BoxDecoration(
+            color: outline,
+            borderRadius: const BorderRadius.only(
               topRight: Radius.circular(2),
               bottomRight: Radius.circular(2),
             ),
@@ -203,18 +209,33 @@ mixin _BleScreenUi on _BleScreenCore {
             ),
           const SizedBox(height: 14),
           OutlinedButton.icon(
-            onPressed: (streaming && !m.calibrating) ? _calibrateMotion : null,
+            onPressed: _openCalibration,
             icon: const Icon(Icons.explore),
-            label: const Text("Calibrate (forehand face up)"),
+            label: const Text("Calibrate"),
           ),
           if (m.hasFaceNormal && !m.faceNormalValid)
             const Padding(
               padding: EdgeInsets.only(top: 6),
               child: Text(
-                "Face-up pose looks off — calibrate with the forehand face "
+                "Face-up pose looks off — recalibrate with the forehand face "
                 "pointing straight up.",
                 textAlign: TextAlign.center,
                 style: TextStyle(fontSize: 12, color: Colors.orange),
+              ),
+            ),
+          if (streaming)
+            Padding(
+              padding: const EdgeInsets.only(top: 4),
+              child: Builder(
+                builder: (_) {
+                  final d = m.leverDir;
+                  return Text(
+                    "Lever dir (${d[0].toStringAsFixed(2)}, "
+                    "${d[1].toStringAsFixed(2)}, ${d[2].toStringAsFixed(2)})"
+                    "  •  ${m.leverTiltDeg.toStringAsFixed(0)}° off board Z",
+                    style: const TextStyle(fontSize: 12, color: Colors.grey),
+                  );
+                },
               ),
             ),
           const SizedBox(height: 18),
@@ -454,21 +475,24 @@ mixin _BleScreenUi on _BleScreenCore {
   // border instead of a separate widget.
   Widget _logRow(SavedLog log) {
     final bool selected = _selectedLogIds.contains(log.id);
+    final scheme = Theme.of(context).colorScheme;
     // In select mode the leading graph/error icon becomes a checkbox.
     final Widget leading = _selectMode
         ? Icon(
             selected ? Icons.check_box : Icons.check_box_outline_blank,
-            color: selected ? Colors.blueAccent : Colors.black45,
+            color: selected ? scheme.primary : scheme.onSurfaceVariant,
           )
         : (log.droppedSamples > 0
               ? const Icon(Icons.error, color: Colors.red)
-              : const Icon(Icons.show_chart, color: Colors.blueAccent));
+              : Icon(Icons.show_chart, color: scheme.primary));
     return InkWell(
       onTap: () => _selectMode ? _toggleLogSelected(log.id) : _openLog(log),
       child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 16),
-        decoration: const BoxDecoration(
-          border: Border(bottom: BorderSide(color: Colors.black12, width: 1)),
+        decoration: BoxDecoration(
+          border: Border(
+            bottom: BorderSide(color: Theme.of(context).dividerColor, width: 1),
+          ),
         ),
         child: Row(
           children: [
@@ -490,7 +514,10 @@ mixin _BleScreenUi on _BleScreenCore {
                     "#${log.id}  •  ${log.durationSec.toStringAsFixed(1)} s",
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(fontSize: 13, color: Colors.black54),
+                    style: TextStyle(
+                      fontSize: 13,
+                      color: scheme.onSurfaceVariant,
+                    ),
                   ),
                 ],
               ),
@@ -637,8 +664,9 @@ mixin _BleScreenUi on _BleScreenCore {
 
   // A floating pill button used by the scroll jump-to-top/bottom overlays.
   Widget _jumpButton(IconData icon, String label, VoidCallback onTap) {
+    final scheme = Theme.of(context).colorScheme;
     return Material(
-      color: Colors.blueAccent,
+      color: scheme.primary,
       elevation: 4,
       borderRadius: BorderRadius.circular(20),
       child: InkWell(
@@ -649,12 +677,12 @@ mixin _BleScreenUi on _BleScreenCore {
           child: Row(
             mainAxisSize: MainAxisSize.min,
             children: [
-              Icon(icon, size: 18, color: Colors.white),
+              Icon(icon, size: 18, color: scheme.onPrimary),
               const SizedBox(width: 6),
               Text(
                 label,
-                style: const TextStyle(
-                  color: Colors.white,
+                style: TextStyle(
+                  color: scheme.onPrimary,
                   fontWeight: FontWeight.w600,
                 ),
               ),
@@ -675,6 +703,7 @@ mixin _BleScreenUi on _BleScreenCore {
         // The log's own captured normal keeps its split stable; older logs
         // without one fall back to the current calibration.
         faceNormal: log.faceNormal ?? _faceNormal,
+        leverDir: _leverDir,
       ),
     );
     // Fixed back/title/actions bar, then one lazy list holding the charts
@@ -808,15 +837,43 @@ mixin _BleScreenUi on _BleScreenCore {
               ],
             ),
           ),
+        // 1. True face speed = swing translation + ω×r rotation (headline).
+        _chartSection(
+          "Face speed",
+          log,
+          [ss.trueFaceSpeed],
+          const [Colors.indigo],
+          const ["face speed"],
+          forcedMin: 0,
+          minTop: _minScaleMps,
+          cornerText: "max ${ss.maxTrueFaceSpeed.toStringAsFixed(1)} m/s",
+          unit: "m/s",
+          decimals: 2,
+        ),
+        // 2. Swing speed (translation only, drift-corrected accel).
+        _chartSection(
+          "Swing speed (drift-corrected)",
+          log,
+          [ss.swingSpeed],
+          const [Colors.blue],
+          const ["swing speed"],
+          forcedMin: 0,
+          minTop: _minScaleMps,
+          cornerText: "max ${ss.maxSwingSpeed.toStringAsFixed(1)} m/s",
+          unit: "m/s",
+          decimals: 2,
+        ),
+        // 3. Face rotation (ω×r) — the rotational component, with the
+        // closing/brushing split when a face-up calibration exists.
         if (ss.hasComponents) ...[
-          // Total, closing (⟂) and brushing (∥) speeds overlaid on one chart.
           _chartSection(
-            "Face speed (ω×r)",
+            "Face rotation (ω×r)",
             log,
             [ss.faceSpeed, ss.facePerp, ss.facePar],
             const [Colors.indigo, Colors.deepOrange, Colors.teal],
-            const ["total speed", "⟂ speed", "∥ speed"],
+            const ["total", "⟂", "∥"],
             forcedMin: 0,
+            minTop: _minScaleMps,
             cornerText:
                 "max ${ss.maxFaceSpeed.toStringAsFixed(1)} · "
                 "⟂ ${ss.maxFacePerp.toStringAsFixed(1)} · "
@@ -824,7 +881,7 @@ mixin _BleScreenUi on _BleScreenCore {
             unit: "m/s",
             decimals: 2,
           ),
-          // Its own chart: how much of that face motion was brushing vs driving.
+          // 4. Spin index — brushing fraction of that rotation.
           _chartSection(
             "Spin index (∥ brushing ÷ total)",
             log,
@@ -842,12 +899,13 @@ mixin _BleScreenUi on _BleScreenCore {
           ),
         ] else ...[
           _chartSection(
-            "Face speed (ω×r)",
+            "Face rotation (ω×r)",
             log,
             [ss.faceSpeed],
             const [Colors.indigo],
-            const ["total speed"],
+            const ["rotation"],
             forcedMin: 0,
+            minTop: _minScaleMps,
             cornerText: "max ${ss.maxFaceSpeed.toStringAsFixed(1)} m/s",
             unit: "m/s",
             decimals: 2,
@@ -855,43 +913,36 @@ mixin _BleScreenUi on _BleScreenCore {
           Padding(
             padding: const EdgeInsets.fromLTRB(12, 4, 12, 8),
             child: Text(
-              "Calibrate face-up on the Connection tab to split face speed into "
-              "closing (⟂ to face) and brushing (∥ to face) components.",
+              "Calibrate face-up on the Connection tab to split face rotation "
+              "into closing (⟂ to face) and brushing (∥ to face) components.",
               style: TextStyle(fontSize: 12, color: Colors.grey.shade600),
             ),
           ),
         ],
-        _chartSection(
-          "Swing speed (drift-corrected)",
-          log,
-          [ss.swingSpeed],
-          const [Colors.blue],
-          const ["swing speed"],
-          forcedMin: 0,
-          cornerText: "max ${ss.maxSwingSpeed.toStringAsFixed(1)} m/s",
-          unit: "m/s",
-          decimals: 2,
-        ),
-        _chartSection(
-          "Accelerometer (G)",
-          log,
-          [log.axes[0], log.axes[1], log.axes[2]],
-          _accelColors,
-          _accelLabels,
-          centerZero: true,
-          unit: "G",
-          decimals: 3,
-        ),
-        _chartSection(
-          "Gyroscope (deg/s)",
-          log,
-          [log.axes[3], log.axes[4], log.axes[5]],
-          _gyroColors,
-          _gyroLabels,
-          centerZero: true,
-          unit: "°/s",
-          decimals: 1,
-        ),
+        // 5. Raw accelerometer (toggle in Settings).
+        if (_showAccelGraph)
+          _chartSection(
+            "Accelerometer (g)",
+            log,
+            [log.axes[0], log.axes[1], log.axes[2]],
+            _accelColors,
+            _accelLabels,
+            centerZero: true,
+            unit: "g",
+            decimals: 3,
+          ),
+        // 6. Raw gyroscope (toggle in Settings).
+        if (_showGyroGraph)
+          _chartSection(
+            "Gyroscope (°/s)",
+            log,
+            [log.axes[3], log.axes[4], log.axes[5]],
+            _gyroColors,
+            _gyroLabels,
+            centerZero: true,
+            unit: "°/s",
+            decimals: 1,
+          ),
         const Divider(height: 1),
         Padding(
           padding: const EdgeInsets.fromLTRB(6, 6, 6, 2),
@@ -917,7 +968,8 @@ mixin _BleScreenUi on _BleScreenCore {
     return [
       TextSpan(
         text: _fmtTimeValue(log.t[i]).padLeft(_timeColWidth),
-        style: TextStyle(color: _csvColColors[0]),
+        // Theme-aware so the time column stays readable in dark mode.
+        style: TextStyle(color: Theme.of(context).colorScheme.onSurfaceVariant),
       ),
       for (int c = 1; c < 7; c++)
         TextSpan(
@@ -935,7 +987,7 @@ mixin _BleScreenUi on _BleScreenCore {
     return [
       TextSpan(
         text: _timeColHeader.padLeft(_timeColWidth),
-        style: TextStyle(color: _csvColColors[0]),
+        style: TextStyle(color: Theme.of(context).colorScheme.onSurfaceVariant),
       ),
       for (int c = 1; c < 7; c++)
         TextSpan(
@@ -969,6 +1021,7 @@ mixin _BleScreenUi on _BleScreenCore {
     List<String>? labels, {
     double? forcedMin,
     double? forcedMax,
+    double? minTop,
     String? cornerText,
     bool centerZero = false,
     String unit = "",
@@ -998,12 +1051,14 @@ mixin _BleScreenUi on _BleScreenCore {
               decimals: decimals,
               forcedMin: forcedMin,
               forcedMax: forcedMax,
+              minTop: minTop,
               cornerText: cornerText,
               centerZero: centerZero,
               hitTimes: log.hitTimes,
               persist: _hoverPersists,
               pos: _hoverPos,
               timeLabel: _fmtTimeLabel,
+              dark: Theme.of(context).brightness == Brightness.dark,
             ),
           ),
         ),
@@ -1038,6 +1093,53 @@ mixin _BleScreenUi on _BleScreenCore {
     return ListView(
       padding: const EdgeInsets.all(20),
       children: [
+        const Text(
+          "Appearance",
+          style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+        ),
+        const SizedBox(height: 8),
+        Align(
+          alignment: Alignment.centerLeft,
+          child: SegmentedButton<ThemeMode>(
+            showSelectedIcon: false,
+            segments: const [
+              ButtonSegment(value: ThemeMode.system, label: Text("System")),
+              ButtonSegment(value: ThemeMode.light, label: Text("Light")),
+              ButtonSegment(value: ThemeMode.dark, label: Text("Dark")),
+            ],
+            selected: {themeModeNotifier.value},
+            onSelectionChanged: (s) {
+              final mode = s.first;
+              themeModeNotifier.value = mode; // repaints the whole app
+              _prefs?.setString(_kThemeModeKey, mode.name);
+              setState(() {}); // update the segmented selection
+            },
+          ),
+        ),
+        const SizedBox(height: 16),
+        const Text(
+          "Theme",
+          style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+        ),
+        const SizedBox(height: 8),
+        Align(
+          alignment: Alignment.centerLeft,
+          child: SegmentedButton<AppTheme>(
+            showSelectedIcon: false,
+            segments: const [
+              ButtonSegment(value: AppTheme.blue, label: Text("Blue")),
+              ButtonSegment(value: AppTheme.gray, label: Text("Gray")),
+            ],
+            selected: {appThemeNotifier.value},
+            onSelectionChanged: (s) {
+              final t = s.first;
+              appThemeNotifier.value = t; // repaints the whole app
+              _prefs?.setString(_kAppThemeKey, t.name);
+              setState(() {});
+            },
+          ),
+        ),
+        const Divider(height: 24),
         SwitchListTile(
           contentPadding: EdgeInsets.zero,
           title: const Text(
@@ -1052,6 +1154,33 @@ mixin _BleScreenUi on _BleScreenCore {
         ..._hitDetectionSettings(),
         const Divider(height: 24),
         ..._paddleSpeedSettings(),
+        const Divider(height: 24),
+        SwitchListTile(
+          contentPadding: EdgeInsets.zero,
+          title: const Text(
+            "Show accelerometer graph",
+            style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+          ),
+          subtitle: const Text("The raw accelerometer (g) trace in each log."),
+          value: _showAccelGraph,
+          onChanged: (v) {
+            setState(() => _showAccelGraph = v);
+            _prefs?.setBool(_kShowAccelKey, v);
+          },
+        ),
+        SwitchListTile(
+          contentPadding: EdgeInsets.zero,
+          title: const Text(
+            "Show gyroscope graph",
+            style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+          ),
+          subtitle: const Text("The raw gyroscope (°/s) trace in each log."),
+          value: _showGyroGraph,
+          onChanged: (v) {
+            setState(() => _showGyroGraph = v);
+            _prefs?.setBool(_kShowGyroKey, v);
+          },
+        ),
         const Divider(height: 24),
         if (_autoLoggingEnabled)
           ..._autoCaptureSettings()
@@ -1193,6 +1322,24 @@ mixin _BleScreenUi on _BleScreenCore {
           _prefs?.setDouble(_kSwingHpKey, v);
           setState(() => _speedCache.clear()); // recompute logs at new window
         },
+      ),
+      const SizedBox(height: 8),
+      const Text(
+        "Minimum graph scale — floors the top of the speed-graph y-axis so a "
+        "slow or still paddle can't autoscale up to look fast. 0 = off.",
+        style: TextStyle(color: Colors.grey),
+      ),
+      const SizedBox(height: 8),
+      _settingSlider(
+        label: "Minimum y-axis scale",
+        value: _minScaleMps,
+        min: 0.0,
+        max: 20.0,
+        divisions: 40, // 0.5 m/s steps
+        unit: "m/s",
+        decimals: 1,
+        onChanged: (v) => setState(() => _minScaleMps = v),
+        onChangeEnd: (v) => _prefs?.setDouble(_kMinScaleKey, v),
       ),
     ];
   }

@@ -16,10 +16,13 @@ class _ChartPainter extends CustomPainter {
   final List<Color> colors;
   final double? forcedMin; // if set, pin the y-axis bottom here (no auto-scale)
   final double? forcedMax; // if set, hard-cap the y-axis top here (no padding)
+  final double?
+  minTop; // if set, floor the y-axis top here (keeps auto above it)
   final String? cornerText; // optional label drawn in the top-right corner
   final bool centerZero; // if true, y-axis is symmetric about 0 (0 centered)
   final List<double> hitTimes; // detected ball-hit times (s) -> vertical lines
   final int? touchIndex; // sample under the finger -> crosshair + dots
+  final bool dark; // dark theme -> black plot background + light ink
 
   // Plot insets, shared with InteractiveChart so a touch x maps to the same
   // axis the painter draws.
@@ -32,18 +35,26 @@ class _ChartPainter extends CustomPainter {
     this.colors, {
     this.forcedMin,
     this.forcedMax,
+    this.minTop,
     this.cornerText,
     this.centerZero = false,
     this.hitTimes = const [],
     this.touchIndex,
+    this.dark = false,
   });
 
   @override
   void paint(Canvas canvas, Size size) {
-    canvas.drawRect(
-      Offset.zero & size,
-      Paint()..color = const Color(0xFFFAFAFA),
-    );
+    // Theme-aware palette: black plot + light ink in dark mode.
+    final Color bg = dark ? const Color(0xFF121212) : const Color(0xFFFAFAFA);
+    final Color borderInk = dark ? Colors.white24 : Colors.black26;
+    final Color gridInk = dark ? Colors.white12 : Colors.black12;
+    final Color axisInk = dark ? Colors.white60 : Colors.black54;
+    final Color zeroInk = dark ? Colors.white38 : Colors.black38;
+    final Color cornerInk = dark ? Colors.white : Colors.black87;
+    final Color faintInk = dark ? Colors.white38 : Colors.black45;
+
+    canvas.drawRect(Offset.zero & size, Paint()..color = bg);
 
     final plot = Rect.fromLTRB(
       padL,
@@ -55,17 +66,12 @@ class _ChartPainter extends CustomPainter {
       plot,
       Paint()
         ..style = PaintingStyle.stroke
-        ..color = Colors.black26
+        ..color = borderInk
         ..strokeWidth = 1,
     );
 
     if (count < 2 || series.isEmpty) {
-      _text(
-        canvas,
-        "No data",
-        plot.center - const Offset(24, 8),
-        Colors.black45,
-      );
+      _text(canvas, "No data", plot.center - const Offset(24, 8), faintInk);
       return;
     }
 
@@ -110,6 +116,9 @@ class _ChartPainter extends CustomPainter {
       vMin -= vpad;
       vMax += vpad;
     }
+    // Floor the top so a small/still signal can't autoscale up to fill the plot
+    // (a hard cap, if any, wins).
+    if (forcedMax == null && minTop != null && vMax < minTop!) vMax = minTop!;
 
     double xOf(double tt) =>
         plot.left + (tt - tMin) / (tMax - tMin) * plot.width;
@@ -117,7 +126,7 @@ class _ChartPainter extends CustomPainter {
         plot.bottom - (vv - vMin) / (vMax - vMin) * plot.height;
 
     final gridPaint = Paint()
-      ..color = Colors.black12
+      ..color = gridInk
       ..strokeWidth = 1;
 
     void hline(double v) {
@@ -127,7 +136,7 @@ class _ChartPainter extends CustomPainter {
         canvas,
         v.toStringAsFixed(v.abs() < 10 ? 1 : 0),
         Offset(2, y - 6),
-        Colors.black54,
+        axisInk,
         size: 9,
       );
     }
@@ -143,7 +152,7 @@ class _ChartPainter extends CustomPainter {
         Offset(plot.left, y),
         Offset(plot.right, y),
         Paint()
-          ..color = Colors.black38
+          ..color = zeroInk
           ..strokeWidth = 1,
       );
     }
@@ -156,7 +165,7 @@ class _ChartPainter extends CustomPainter {
         canvas,
         tt.toStringAsFixed(1),
         Offset(x - 8, plot.bottom + 4),
-        Colors.black54,
+        axisInk,
         size: 9,
       );
     }
@@ -205,7 +214,7 @@ class _ChartPainter extends CustomPainter {
         Offset(cx, plot.top),
         Offset(cx, plot.bottom),
         Paint()
-          ..color = Colors.black54
+          ..color = axisInk
           ..strokeWidth = 1,
       );
       for (int a = 0; a < series.length; a++) {
@@ -227,8 +236,8 @@ class _ChartPainter extends CustomPainter {
       final tp = TextPainter(
         text: TextSpan(
           text: cornerText,
-          style: const TextStyle(
-            color: Colors.black87,
+          style: TextStyle(
+            color: cornerInk,
             fontSize: 12,
             fontWeight: FontWeight.bold,
           ),
@@ -257,10 +266,12 @@ class _ChartPainter extends CustomPainter {
       old.colors != colors ||
       old.forcedMin != forcedMin ||
       old.forcedMax != forcedMax ||
+      old.minTop != minTop ||
       old.cornerText != cornerText ||
       old.centerZero != centerZero ||
       old.hitTimes != hitTimes ||
-      old.touchIndex != touchIndex;
+      old.touchIndex != touchIndex ||
+      old.dark != dark;
 }
 
 /// Wraps a [_ChartPainter] with touch tracking: dragging horizontally (or
@@ -277,12 +288,14 @@ class InteractiveChart extends StatefulWidget {
   final int decimals;
   final double? forcedMin;
   final double? forcedMax;
+  final double? minTop;
   final String? cornerText;
   final bool centerZero;
   final List<double> hitTimes;
   final bool persist; // keep the readout after the finger lifts
   final HoverReadoutPos pos; // which side the readout box sits on
   final String Function(double) timeLabel; // formats a sample time for readout
+  final bool dark; // dark theme -> black plot + light ink
 
   const InteractiveChart({
     super.key,
@@ -295,12 +308,14 @@ class InteractiveChart extends StatefulWidget {
     required this.decimals,
     required this.forcedMin,
     this.forcedMax,
+    this.minTop,
     required this.cornerText,
     required this.centerZero,
     required this.hitTimes,
     required this.persist,
     required this.pos,
     required this.timeLabel,
+    this.dark = false,
   });
 
   @override
@@ -365,10 +380,12 @@ class _InteractiveChartState extends State<InteractiveChart> {
                   widget.colors,
                   forcedMin: widget.forcedMin,
                   forcedMax: widget.forcedMax,
+                  minTop: widget.minTop,
                   cornerText: widget.cornerText,
                   centerZero: widget.centerZero,
                   hitTimes: widget.hitTimes,
                   touchIndex: _touchIndex,
+                  dark: widget.dark,
                 ),
                 child: const SizedBox.expand(),
               ),
@@ -384,13 +401,18 @@ class _InteractiveChartState extends State<InteractiveChart> {
     final int ti = _touchIndex!;
     // A dismiss control only makes sense for a pinned (persistent) readout.
     final bool showClose = widget.persist;
+    final Color boxBg = widget.dark
+        ? const Color(0xF21E1E1E)
+        : const Color(0xF2FFFFFF);
+    final Color boxBorder = widget.dark ? Colors.white24 : Colors.black26;
+    final Color labelInk = widget.dark ? Colors.white : Colors.black87;
     final children = <Widget>[
       Text(
         "t = ${widget.timeLabel(widget.t[ti])}",
-        style: const TextStyle(
+        style: TextStyle(
           fontSize: 11,
           fontWeight: FontWeight.bold,
-          color: Colors.black87,
+          color: labelInk,
         ),
       ),
       for (int a = 0; a < widget.series.length; a++)
@@ -415,9 +437,9 @@ class _InteractiveChartState extends State<InteractiveChart> {
             // over a value.
             padding: EdgeInsets.fromLTRB(8, 6, showClose ? 26 : 8, 6),
             decoration: BoxDecoration(
-              color: const Color(0xF2FFFFFF),
+              color: boxBg,
               borderRadius: BorderRadius.circular(6),
-              border: Border.all(color: Colors.black26),
+              border: Border.all(color: boxBorder),
             ),
             child: Column(
               mainAxisSize: MainAxisSize.min,
