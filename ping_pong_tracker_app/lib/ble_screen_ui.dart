@@ -1088,6 +1088,86 @@ mixin _BleScreenUi on _BleScreenCore {
     );
   }
 
+  // A split-circle swatch for one colour theme: left half shows that theme's
+  // top-bar colour, right half its accent (sliders/toggles/text), per the
+  // current colour-swap arrangement. When both halves are the same shade
+  // (all-light / all-dark) the circle looks solid. The selected swatch gets a
+  // ring.
+  Widget _themeSwatch(AppTheme t) {
+    final (bar, accent) = _swapColors(t, colorSwapNotifier.value);
+    final ColorScheme scheme = Theme.of(context).colorScheme;
+    final bool selected = appThemeNotifier.value == t;
+    return GestureDetector(
+      onTap: () {
+        appThemeNotifier.value = t; // repaints the whole app
+        _prefs?.setString(_kAppThemeKey, t.name);
+        setState(() {});
+      },
+      child: Container(
+        width: 54,
+        height: 54,
+        padding: const EdgeInsets.all(3),
+        decoration: BoxDecoration(
+          shape: BoxShape.circle,
+          border: Border.all(
+            color: selected ? scheme.onSurface : scheme.outlineVariant,
+            width: selected ? 3 : 1.5,
+          ),
+        ),
+        child: ClipOval(
+          child: Row(
+            children: [
+              Expanded(child: Container(color: bar)),
+              Expanded(child: Container(color: accent)),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  // The double-arrow button that cycles the four colour-swap arrangements. All
+  // swatches and the live app update together (they read colorSwapNotifier).
+  Widget _colorSwapButton() {
+    final ColorScheme scheme = Theme.of(context).colorScheme;
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        IconButton.filledTonal(
+          onPressed: _cycleColorSwap,
+          icon: const Icon(Icons.autorenew),
+          tooltip: "Cycle colour arrangement",
+        ),
+        const SizedBox(height: 4),
+        Text(
+          _swapLabel(colorSwapNotifier.value),
+          style: TextStyle(fontSize: 11, color: scheme.onSurfaceVariant),
+        ),
+      ],
+    );
+  }
+
+  void _cycleColorSwap() {
+    final next = ColorSwap
+        .values[(colorSwapNotifier.value.index + 1) % ColorSwap.values.length];
+    colorSwapNotifier.value = next; // repaints the whole app
+    _prefs?.setString(_kColorSwapKey, next.name);
+    setState(() {}); // update the swatches + label
+  }
+
+  String _swapLabel(ColorSwap s) {
+    switch (s) {
+      case ColorSwap.normal:
+        return "Normal";
+      case ColorSwap.reversed:
+        return "Swapped";
+      case ColorSwap.allLight:
+        return "Lighter";
+      case ColorSwap.allDark:
+        return "Darker";
+    }
+  }
+
   // ---- Settings tab ----
   Widget _buildSettingsTab() {
     return ListView(
@@ -1121,23 +1201,33 @@ mixin _BleScreenUi on _BleScreenCore {
           "Theme",
           style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
         ),
-        const SizedBox(height: 8),
-        Align(
-          alignment: Alignment.centerLeft,
-          child: SegmentedButton<AppTheme>(
-            showSelectedIcon: false,
-            segments: const [
-              ButtonSegment(value: AppTheme.blue, label: Text("Blue")),
-              ButtonSegment(value: AppTheme.gray, label: Text("Gray")),
-            ],
-            selected: {appThemeNotifier.value},
-            onSelectionChanged: (s) {
-              final t = s.first;
-              appThemeNotifier.value = t; // repaints the whole app
-              _prefs?.setString(_kAppThemeKey, t.name);
-              setState(() {});
-            },
-          ),
+        const SizedBox(height: 12),
+        Row(
+          crossAxisAlignment: CrossAxisAlignment.center,
+          children: [
+            // Grid of split-circle swatches, four per row, spread across the
+            // width so the swap button sits alongside rather than stranded.
+            Expanded(
+              child: Column(
+                children: [
+                  for (int i = 0; i < AppTheme.values.length; i += 4)
+                    Padding(
+                      padding: EdgeInsets.only(top: i == 0 ? 0 : 14),
+                      child: Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                        children: [
+                          for (final t in AppTheme.values.skip(i).take(4))
+                            _themeSwatch(t),
+                        ],
+                      ),
+                    ),
+                ],
+              ),
+            ),
+            const SizedBox(width: 14),
+            // Cycles the colour arrangement across every theme at once.
+            _colorSwapButton(),
+          ],
         ),
         const Divider(height: 24),
         SwitchListTile(
