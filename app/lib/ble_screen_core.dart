@@ -1,5 +1,11 @@
 part of 'main.dart';
 
+// Minimum paddle firmware this app can talk to. The app speaks only the current
+// packet format (no back-compat), so an older board is rejected on connect with
+// an "update firmware" note. Bump these when the firmware packet format changes.
+const int _kReqFwMajor = 1;
+const int _kReqFwMinor = 3;
+
 // All connection, packet, capture/logging, persistence and estimator glue
 // for the paddle screen. UI builders live in ble_screen_ui.dart.
 mixin _BleScreenCore
@@ -24,6 +30,9 @@ mixin _BleScreenCore
   );
   // Firmware version reported by the board; "?" until read on connect.
   String _firmwareVersion = "?";
+  // Connected board's firmware is older than this app supports: we stay
+  // connected but don't stream, and the Connection tab shows an update warning.
+  bool _fwOutdated = false;
 
   // ---- Live display ----
   List<String> _imuData = ["0.00", "0.00", "0.00", "0.00", "0.00", "0.00"];
@@ -76,10 +85,9 @@ mixin _BleScreenCore
   DateTime? _manualLogStart;
   Timer? _manualProgressTimer;
 
-  // Free-running clock + last-packet time, for continuous per-sample timestamps
-  // (kept running the whole session so ring/capture times are consistent).
+  // Free-running clock, for continuous per-sample timestamps (kept running the
+  // whole session so ring/capture times are consistent).
   final Stopwatch _streamStopwatch = Stopwatch();
-  int _lastStreamPacketUs = 0;
 
   // ---- Chip-clock timestamping (firmware >= 1.1) ----
   // The packet header carries the first sample's chip micros() + a cumulative
@@ -662,13 +670,25 @@ mixin _BleScreenCore
   }
 
   void _subscribeToCharacteristic(BluetoothCharacteristic char) async {
+    // Back-compat dropped: this app speaks only the fw >= 1.3 packet format. If
+    // the paddle is older, stay connected but don't subscribe — its packets
+    // would misparse. The Connection tab shows an update warning and only
+    // Connect/Disconnect work.
+    if (!_fwAtLeast(_kReqFwMajor, _kReqFwMinor)) {
+      setState(() {
+        _fwOutdated = true;
+        _connectionStatus = "Firmware update required";
+        _isConnecting = false;
+      });
+      return;
+    }
+    _fwOutdated = false;
     await char.setNotifyValue(true);
     // Allocate the ring + capture buffers and start a free-running clock so the
     // ring stays warm (auto-capture history is ready the moment we arm).
     _ensureCaptureBuffers();
     _ringLen = 0;
     _ringHead = 0;
-    _lastStreamPacketUs = 0;
     _haveChipRef = false;
     _chipBaseUs = 0;
     _lastChipTsec = 0;
@@ -694,38 +714,40 @@ mixin _BleScreenCore
     return maj > major || (maj == major && min >= minor);
   }
 
-  // Batched binary packet. Firmware >= 1.3 uses a 12-byte header
+  // Batched binary packet (fw >= 1.3 — the only format this app supports; older
+  // firmware is rejected on connect). 12-byte header:
   //   [u32 firstSampleIndex][u32 firstSampleMicros][battery][N][u16 batteryMv]
-  // fw 1.1-1.2 use a 10-byte header (no mV); older firmware a 2-byte header
-  // [N][battery]; then N*12 bytes of int16 LE ax, ay, az, gx, gy, gz (raw counts).
+  // then N*12 bytes of int16 LE ax, ay, az, gx, gy, gz (raw sensor counts).
   void _onPacket(List<int> value) {
-    final bool chipTime = _fwAtLeast(1, 1);
-    final bool fineBatt = _fwAtLeast(1, 3); // raw mV field in the header
-    final int hdr = fineBatt ? 12 : (chipTime ? 10 : 2);
+    const int hdr = 12;
     if (value.length < hdr) return;
     final bd = ByteData.view(Uint8List.fromList(value).buffer);
-    final int count = chipTime ? value[9] : value[0];
-    final int battByte = chipTime ? value[8] : value[1];
-    // Firmware >= 1.3 marks "charging" in the high bit of the battery byte and,
-    // while charging, sends header-only status packets (N = 0, no IMU stream).
+    final int count = value[9];
+    final int battByte = value[8];
+    // Bit 7 of the battery byte marks "charging"; while charging the board sends
+    // header-only status packets (N = 0, no IMU stream).
     final bool charging = (battByte & 0x80) != 0;
-    // fw >= 1.3 sends raw cell millivolts -> map SoC on a real LiPo curve at
-    // sub-1% resolution; older firmware only has the coarse integer % byte.
-    final double battPct = fineBatt
-        ? _lipoPercentFromMv(bd.getUint16(10, Endian.little))
+    // Raw cell millivolts -> SoC on a real LiPo curve at sub-1% resolution. An
+    // unread mV is 0 (e.g. a packet in the first ~2 s before the board's ADC
+    // block runs), which would map to a spurious 0% and get pinned by the
+    // never-rise clamp — so fall back to the coarse % byte (firmware seeds it
+    // high) whenever the mV field isn't a real reading.
+    final int battMv = bd.getUint16(10, Endian.little);
+    final double battPct = battMv > 0
+        ? _lipoPercentFromMv(battMv)
         : (battByte & 0x7F).toDouble();
 
-    if (charging || count == 0) {
+    // A charging-status packet always sets the charging bit; streaming packets
+    // never carry N == 0, so the charging bit alone selects this branch.
+    if (charging) {
       if (!_charging) {
         // Entering the charging state: start a fresh time-to-full history.
         _charging = true;
         _connectionStatus = "Charging";
         _sampleRateStr = "0";
+        _resetChargeEstimate();
         _timeToFull = "estimating…";
-        _chargeSamples.clear();
-        _chargeStopwatch
-          ..reset()
-          ..start();
+        _chargeStopwatch.start();
       }
       _updateBattery(battPct, charging: true);
       _recordChargeSample();
@@ -737,9 +759,7 @@ mixin _BleScreenCore
     if (_charging) {
       _charging = false;
       _connectionStatus = "Streaming Data";
-      _timeToFull = "—";
-      _chargeSamples.clear();
-      _chargeStopwatch.stop();
+      _resetChargeEstimate();
       _haveChipRef = false;
       _windowStart = null;
       _lastChipTsec = 0;
@@ -758,16 +778,13 @@ mixin _BleScreenCore
       _windowStart = now;
     }
 
-    // Packet time base. Firmware >= 1.1 gives exact chip timestamps: we rebuild
-    // an absolute µs timeline (wrap-safe) and detect dropped samples from a jump
-    // in the sample index. Older firmware falls back to interpolating the
-    // phone's free-running clock across the packet.
-    final int prevUs = _lastStreamPacketUs;
-    final int nowUs = _streamStopwatch.elapsedMicroseconds;
+    // Packet time base: the chip's exact timestamps let us rebuild an absolute
+    // µs timeline (wrap-safe) and detect dropped samples from a jump in the
+    // sample index.
     double baseIndex =
         0; // this packet's first sample index (from session start)
     double dtUs = 1e6 / _odrHz; // µs per sample used to space the timeline
-    if (chipTime) {
+    {
       final int firstIndex = bd.getUint32(0, Endian.little);
       final int firstMicros = bd.getUint32(4, Endian.little);
       if (_haveChipRef) {
@@ -814,14 +831,9 @@ mixin _BleScreenCore
       // Run the fusion filter at the true per-sample rate (fixed ODR).
       if (liveTab) _motion.update(ax, ay, az, gx, gy, gz);
 
-      double tSec;
-      if (chipTime) {
-        tSec = (baseIndex + s) * dtUs / 1e6;
-        if (tSec < _lastChipTsec) tSec = _lastChipTsec; // guarantee monotonic
-        _lastChipTsec = tSec;
-      } else {
-        tSec = (prevUs + (nowUs - prevUs) * (s + 1) / count) / 1e6;
-      }
+      double tSec = (baseIndex + s) * dtUs / 1e6;
+      if (tSec < _lastChipTsec) tSec = _lastChipTsec; // guarantee monotonic
+      _lastChipTsec = tSec;
       final double amag = math.sqrt(ax * ax + ay * ay + az * az);
 
       // Ball-hit detection runs continuously; a hit both marks the log and (in
@@ -835,7 +847,6 @@ mixin _BleScreenCore
         _appendManualSample(tSec, ax, ay, az, gx, gy, gz);
       }
     }
-    _lastStreamPacketUs = nowUs;
 
     _imuData = [
       ax.toStringAsFixed(3),
@@ -920,6 +931,15 @@ mixin _BleScreenCore
     _batteryPct = _batteryShown.toString();
   }
 
+  // Clear the time-to-full history back to idle (stopped clock, no estimate).
+  void _resetChargeEstimate() {
+    _timeToFull = "—";
+    _chargeSamples.clear();
+    _chargeStopwatch
+      ..stop()
+      ..reset();
+  }
+
   // Record one charging data point (~0.5 Hz) and refresh the time-to-full text.
   void _recordChargeSample() {
     final double t = _chargeStopwatch.elapsedMilliseconds / 1000.0;
@@ -979,12 +999,9 @@ mixin _BleScreenCore
       _batterySmoothed = -1; // fresh session -> re-seed the smoother
       _batteryShown = -1;
       _charging = false;
-      _timeToFull = "—";
-      _chargeSamples.clear();
-      _chargeStopwatch
-        ..stop()
-        ..reset();
+      _resetChargeEstimate();
       _firmwareVersion = "?";
+      _fwOutdated = false;
       _imuData = ["0.00", "0.00", "0.00", "0.00", "0.00", "0.00"];
       _armed = false;
       _recording = false;
@@ -992,7 +1009,6 @@ mixin _BleScreenCore
       _streamStopwatch
         ..stop()
         ..reset();
-      _lastStreamPacketUs = 0;
       _ringLen = 0;
       _ringHead = 0;
       _hitDetector.reset();
