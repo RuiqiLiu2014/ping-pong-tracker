@@ -93,6 +93,25 @@ void disconnectCallback(uint16_t connHandle, uint8_t reason) {
   Serial.println("Central disconnected");
 }
 
+// Read the battery divider (oversampled) into batteryMv + coarse batteryPct.
+// Called once in setup() to prime the values, then every 2 s from loop(), so a
+// packet never ships an unread mV of 0 (which the app would map to a stuck 0%).
+void sampleBattery() {
+  digitalWrite(VBAT_ENABLE, LOW);   // enable divider (active low)
+  delay(2);
+  // Oversample: one analogRead carries the full ADC noise, so average 64 of
+  // them (~8x less noise, still well under 1 ms) before scaling to volts.
+  uint32_t acc = 0;
+  for (int i = 0; i < 64; i++) acc += analogRead(PIN_VBAT);
+  digitalWrite(VBAT_ENABLE, HIGH);
+  float rawADC = acc / 64.0f;
+  float vbat = (rawADC / 4096.0f) * 3.6f * (1510.0f / 510.0f);
+  batteryMv = (uint16_t)(vbat * 1000.0f);   // raw mV -> app maps SoC on a LiPo curve
+  // Coarse % kept for older apps; the app prefers the mV field when present.
+  int pct = (int)(((vbat - 3.2f) / (4.2f - 3.2f)) * 100.0f);
+  batteryPct = constrain(pct, 0, 100);
+}
+
 void setup() {
   Serial.begin(115200);
   uint32_t startWait = millis();
@@ -120,6 +139,7 @@ void setup() {
   analogReadResolution(12);
   digitalWrite(VBAT_ENABLE, HIGH);   // divider off until we sample
   pinMode(PIN_CHARGE_STATE, INPUT_PULLUP);  // open-drain CHG line; LOW = charging
+  sampleBattery();                          // prime batteryMv/Pct before streaming
 
   // ---- BLE ----
   Bluefruit.configPrphBandwidth(BANDWIDTH_MAX);   // must precede begin()
@@ -161,19 +181,7 @@ void loop() {
   // ---- Battery every 2 s ----
   uint32_t nowUs = micros();
   if (nowUs - lastBattUs > 2000000UL) {
-    digitalWrite(VBAT_ENABLE, LOW);   // enable divider (active low)
-    delay(2);
-    // Oversample: one analogRead carries the full ADC noise, so average 64 of
-    // them (~8x less noise, still well under 1 ms) before scaling to volts.
-    uint32_t acc = 0;
-    for (int i = 0; i < 64; i++) acc += analogRead(PIN_VBAT);
-    digitalWrite(VBAT_ENABLE, HIGH);
-    float rawADC = acc / 64.0f;
-    float vbat = (rawADC / 4096.0f) * 3.6f * (1510.0f / 510.0f);
-    batteryMv = (uint16_t)(vbat * 1000.0f);   // raw mV -> app maps SoC on a LiPo curve
-    // Coarse % kept for older apps; the app prefers the mV field when present.
-    int pct = (int)(((vbat - 3.2f) / (4.2f - 3.2f)) * 100.0f);
-    batteryPct = constrain(pct, 0, 100);
+    sampleBattery();
     lastBattUs = nowUs;
   }
 

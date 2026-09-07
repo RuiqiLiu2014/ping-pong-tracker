@@ -74,6 +74,50 @@ mixin _BleScreenUi on _BleScreenCore {
     );
   }
 
+  // Shown on the Connection tab when the paddle's firmware is older than this
+  // app supports. The Logs/Settings tabs stay usable; here only Connect and
+  // Disconnect work (Calibrate and the logging controls are disabled).
+  Widget _firmwareUpdateBanner() {
+    return Container(
+      margin: const EdgeInsets.symmetric(vertical: 12),
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: Colors.orange.withAlpha(38),
+        border: Border.all(color: Colors.orange, width: 1.5),
+        borderRadius: BorderRadius.circular(10),
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Icon(Icons.system_update, color: Colors.orange),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text(
+                  "Firmware update required",
+                  style: TextStyle(
+                    fontWeight: FontWeight.bold,
+                    color: Colors.orange,
+                    fontSize: 15,
+                  ),
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  "This paddle is running v$_firmwareVersion, but the app needs "
+                  "v$_kReqFwMajor.$_kReqFwMinor or newer. Update the firmware to "
+                  "stream data.",
+                  style: const TextStyle(fontSize: 13),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
   // Compact iPhone-style battery gauge: percentage in front of a small
   // horizontal cell. Fill and text are tinted by level for at-a-glance reading
   // (a darker text shade keeps the number legible over the tab background).
@@ -150,6 +194,9 @@ mixin _BleScreenUi on _BleScreenCore {
   Widget _buildConnectionTab() {
     final streaming = _connectionStatus == "Streaming Data";
     final charging = _charging;
+    // Connected (so Connect flips to Disconnect) even when the firmware is too
+    // old to stream — that state still holds an active BLE link.
+    final connected = streaming || _fwOutdated;
     final m = _motion;
     final String orientationText = m.calibrated
         ? "Roll: ${m.roll.toStringAsFixed(0)}°   Pitch: ${m.pitch.toStringAsFixed(0)}°"
@@ -169,6 +216,7 @@ mixin _BleScreenUi on _BleScreenCore {
               color: (streaming || charging) ? Colors.green : Colors.red,
             ),
           ),
+          if (_fwOutdated) _firmwareUpdateBanner(),
           const SizedBox(height: 10),
           Text(
             charging
@@ -229,7 +277,7 @@ mixin _BleScreenUi on _BleScreenCore {
             ),
           const SizedBox(height: 14),
           OutlinedButton.icon(
-            onPressed: _openCalibration,
+            onPressed: _fwOutdated ? null : _openCalibration,
             icon: const Icon(Icons.explore),
             label: const Text("Calibrate"),
           ),
@@ -260,14 +308,14 @@ mixin _BleScreenUi on _BleScreenCore {
             ),
           const SizedBox(height: 18),
           ElevatedButton(
-            onPressed: _isConnecting || streaming
+            onPressed: _isConnecting || connected
                 ? _disconnect
                 : _startScanAndConnect,
             style: ElevatedButton.styleFrom(
               padding: const EdgeInsets.symmetric(horizontal: 40, vertical: 15),
             ),
             child: Text(
-              streaming ? "Disconnect" : "Connect to Paddle",
+              connected ? "Disconnect" : "Connect to Paddle",
               style: const TextStyle(fontSize: 18),
             ),
           ),
