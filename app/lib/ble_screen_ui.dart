@@ -171,8 +171,9 @@ mixin _BleScreenUi on _BleScreenCore {
           ),
           const SizedBox(height: 10),
           Text(
-            // TODO: estimate time-to-full from the charging rate (placeholder).
-            charging ? "Time to full: —" : "Sample Rate: $_sampleRateStr Hz",
+            charging
+                ? "Time to full: $_timeToFull"
+                : "Sample Rate: $_sampleRateStr Hz",
             style: const TextStyle(fontSize: 16, color: Colors.grey),
           ),
           if (streaming || charging) ...[
