@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 640" width="900" height="640">
+  <g fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
+
+    <!-- ===== Board, stretched off BOTH upper corners (open ends) ===== -->
+    <path d="M430 470 L900 206"/>
+    <path d="M430 470 L0 228"/>
+    <path d="M430 470 L430 496"/>
+    <path d="M430 496 L900 232"/>
+    <path d="M430 496 L0 254"/>
+    <path d="M761 284 L571 177" stroke-width="1.5"/>
+    <path d="M450 109 L256 0" stroke-width="1.5"/>
+
+    <!-- ===== Paddle standing vertically on the board (round base in perspective) ===== -->
+    <path d="M477 282 L473 342" stroke-width="3"/>
+    <path d="M503 282 L507 342" stroke-width="3"/>
+    <ellipse cx="490" cy="342" rx="17" ry="7" stroke-width="3"/>
+    <ellipse cx="490" cy="190" rx="82" ry="92" stroke-width="3.5"/>
+    <g stroke-width="2.5">
+      <path d="M610 335 L610 240"/>
+      <polyline points="598,262 610,238 622,262"/>
+    </g>
+
+  </g>
+</svg>

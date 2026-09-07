@@ -1,0 +1,57 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 640" width="900" height="640">
+  <rect x="0" y="0" width="900" height="640" fill="white"/>
+  <g fill="none" stroke="black" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
+
+    <!-- ===== Table ===== -->
+    <!-- legs (drawn first, behind the top) -->
+    <g stroke-width="2.5">
+      <!-- near-left leg (A) -->
+      <line x1="158" y1="380" x2="158" y2="512"/>
+      <line x1="170" y1="384" x2="170" y2="512"/>
+      <line x1="158" y1="512" x2="170" y2="512"/>
+      <!-- near-right leg (B) -->
+      <line x1="430" y1="480" x2="430" y2="612"/>
+      <line x1="442" y1="480" x2="442" y2="612"/>
+      <line x1="430" y1="612" x2="442" y2="612"/>
+      <!-- far-right leg (C) -->
+      <line x1="760" y1="340" x2="760" y2="470"/>
+      <line x1="772" y1="342" x2="772" y2="470"/>
+      <line x1="760" y1="470" x2="772" y2="470"/>
+    </g>
+
+    <!-- table top (parallelogram) -->
+    <path d="M150 380 L430 480 L770 340 L490 240 Z" fill="white" stroke-width="3.5"/>
+
+    <!-- centre line (down the length) -->
+    <line x1="290" y1="430" x2="630" y2="290" stroke-width="2"/>
+
+    <!-- net: base + top + posts across the width -->
+    <line x1="320" y1="310" x2="600" y2="410" stroke-width="2.5"/>
+    <line x1="320" y1="255" x2="600" y2="355" stroke-width="2.5"/>
+    <line x1="320" y1="310" x2="320" y2="255" stroke-width="2.5"/>
+    <line x1="600" y1="410" x2="600" y2="355" stroke-width="2.5"/>
+    <!-- net mesh -->
+    <g stroke-width="1">
+      <line x1="360" y1="324" x2="360" y2="269"/>
+      <line x1="400" y1="338" x2="400" y2="283"/>
+      <line x1="440" y1="353" x2="440" y2="298"/>
+      <line x1="480" y1="367" x2="480" y2="312"/>
+      <line x1="520" y1="381" x2="520" y2="326"/>
+      <line x1="560" y1="396" x2="560" y2="341"/>
+    </g>
+
+    <!-- ===== Paddle: foreshortened into the table plane (lying flat) ===== -->
+    <!-- basis: local +x = table width dir, local +y = table length dir -->
+    <g transform="matrix(0.9418,0.3364,0.9239,-0.3804,465,400)">
+      <!-- handle (behind the face, extends off the right edge) -->
+      <rect x="60" y="-17" width="120" height="34" rx="16" ry="16" fill="white" stroke-width="3"/>
+      <!-- face -->
+      <ellipse cx="0" cy="0" rx="74" ry="50" fill="white" stroke-width="3.5"/>
+    </g>
+    <!-- label: kept upright-ish (only rotated) so it stays readable on the face -->
+    <text transform="rotate(20 465 400)" x="465" y="400" text-anchor="middle"
+          dominant-baseline="central" fill="black" stroke="none"
+          font-family="Helvetica, Arial, sans-serif" font-size="23" font-weight="600">forehand side</text>
+
+  </g>
+</svg>

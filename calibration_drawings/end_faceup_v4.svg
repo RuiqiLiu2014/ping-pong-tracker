@@ -1,0 +1,36 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 640" width="900" height="640">
+  <g fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
+
+    <!-- ===== Board, stretched off BOTH upper corners (open ends) ===== -->
+    <path d="M430 470 L573 390"/>
+    <path d="M598 376 L900 206"/>
+    <path d="M430 470 L0 228"/>
+    <path d="M430 470 L430 496"/>
+    <path d="M430 496 L592 405"/>
+    <path d="M612 393 L900 232"/>
+    <path d="M430 496 L0 254"/>
+    <path d="M761 284 L256 0" stroke-width="1.5"/>
+
+    <!-- ===== Paddle: flat on the board, with thickness (blade unchanged) ===== -->
+    <ellipse cx="525" cy="344" rx="91" ry="51" stroke-width="3.5"/>
+    <path d="M434 344 L434 352" stroke-width="3"/>
+    <path d="M434 352 A91 51 0 0 0 588 389" stroke-width="3"/>
+    <path d="M616 344 L616 352" stroke-width="3"/>
+    <path d="M616 352 A91 51 0 0 1 605 376" stroke-width="3"/>
+    <!-- handle: 3D box (width + thickness) joining into the blade, oval butt cap -->
+    <path d="M586 371 L657 404" stroke-width="3"/>
+    <path d="M590 389 L644 429" stroke-width="3"/>
+    <path d="M590 389 L590 400" stroke-width="3"/>
+    <path d="M590 400 L644 440" stroke-width="3"/>
+    <path d="M644 429 L644 440" stroke-width="3"/>
+    <ellipse cx="650" cy="417" rx="14" ry="8" transform="rotate(-61 650 417)" stroke-width="3"/>
+    <!-- label -->
+    <text transform="rotate(12 525 344)" x="525" y="344" text-anchor="middle"
+          fill="currentColor" stroke="none"
+          font-family="Helvetica, Arial, sans-serif" font-size="24" font-weight="600">
+      <tspan x="525" dy="-10">forehand</tspan>
+      <tspan x="525" dy="30">side</tspan>
+    </text>
+
+  </g>
+</svg>
