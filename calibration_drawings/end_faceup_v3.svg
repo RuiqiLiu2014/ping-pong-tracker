@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 640" width="900" height="640">
+  <g fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
+
+    <!-- ===== Board, stretched off BOTH upper corners (open ends) ===== -->
+    <path d="M430 470 L573 390"/>
+    <path d="M598 376 L900 206"/>
+    <path d="M430 470 L0 228"/>
+    <path d="M430 470 L430 496"/>
+    <path d="M430 496 L588 407"/>
+    <path d="M634 381 L900 232"/>
+    <path d="M430 496 L0 254"/>
+    <path d="M761 284 L256 0" stroke-width="1.5"/>
+
+    <!-- ===== Paddle: flat on the board, with thickness ===== -->
+    <!-- blade: top face + edge thickness (left/bottom and right slivers) -->
+    <ellipse cx="525" cy="344" rx="91" ry="51" stroke-width="3.5"/>
+    <path d="M434 344 L434 352" stroke-width="3"/>
+    <path d="M434 352 A91 51 0 0 0 570 396" stroke-width="3"/>
+    <path d="M616 344 L616 352" stroke-width="3"/>
+    <path d="M616 352 A91 51 0 0 1 605 376" stroke-width="3"/>
+    <!-- handle: thicker grip, flared oval butt, tapering to the wood -->
+    <path d="M590 364 L661 399 Q675 406 668 426 Q662 439 641 434 L575 392" stroke-width="3"/>
+    <path d="M575 392 L575 406 L641 448 Q665 454 669 438 Q671 430 665 424" stroke-width="3"/>
+    <!-- label -->
+    <text transform="rotate(12 525 344)" x="525" y="344" text-anchor="middle"
+          fill="currentColor" stroke="none"
+          font-family="Helvetica, Arial, sans-serif" font-size="24" font-weight="600">
+      <tspan x="525" dy="-10">forehand</tspan>
+      <tspan x="525" dy="30">side</tspan>
+    </text>
+
+  </g>
+</svg>

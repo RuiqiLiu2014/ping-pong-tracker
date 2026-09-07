@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:flutter_svg/flutter_svg.dart';
 
 import '../motion_estimator.dart';
 
@@ -110,6 +111,11 @@ class _CalibrationWizardState extends State<CalibrationWizard> {
   int get _stepNumber =>
       (_step == _Step.faceUp || _step == _Step.faceUpRunning) ? 1 : 2;
 
+  // Illustration for the current step (sketch of the required paddle pose).
+  String get _stepAsset => _stepNumber == 1
+      ? 'assets/calibration_faceup.svg'
+      : 'assets/calibration_vertical.svg';
+
   @override
   Widget build(BuildContext context) {
     final bool done = _step == _Step.done;
@@ -140,6 +146,18 @@ class _CalibrationWizardState extends State<CalibrationWizard> {
                             Icons.check_circle,
                             size: 64,
                             color: Colors.green,
+                          ),
+                        )
+                      else
+                        Padding(
+                          padding: const EdgeInsets.only(bottom: 24),
+                          child: ClipRRect(
+                            borderRadius: BorderRadius.circular(16),
+                            child: SvgPicture.asset(
+                              _stepAsset,
+                              height: 230,
+                              fit: BoxFit.contain,
+                            ),
                           ),
                         ),
                       Text(

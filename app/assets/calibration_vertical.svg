@@ -1,0 +1,55 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 640" width="900" height="640">
+  <rect x="0" y="0" width="900" height="640" fill="white"/>
+  <g fill="none" stroke="black" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
+
+    <!-- ===== Table (same diagonal view) ===== -->
+    <g stroke-width="2.5">
+      <line x1="158" y1="380" x2="158" y2="512"/>
+      <line x1="170" y1="384" x2="170" y2="512"/>
+      <line x1="158" y1="512" x2="170" y2="512"/>
+      <line x1="430" y1="480" x2="430" y2="612"/>
+      <line x1="442" y1="480" x2="442" y2="612"/>
+      <line x1="430" y1="612" x2="442" y2="612"/>
+      <line x1="760" y1="340" x2="760" y2="470"/>
+      <line x1="772" y1="342" x2="772" y2="470"/>
+      <line x1="760" y1="470" x2="772" y2="470"/>
+    </g>
+    <path d="M150 380 L430 480 L770 340 L490 240 Z" fill="white" stroke-width="3.5"/>
+    <line x1="290" y1="430" x2="630" y2="290" stroke-width="2"/>
+    <!-- net -->
+    <line x1="320" y1="310" x2="600" y2="410" stroke-width="2.5"/>
+    <line x1="320" y1="255" x2="600" y2="355" stroke-width="2.5"/>
+    <line x1="320" y1="310" x2="320" y2="255" stroke-width="2.5"/>
+    <line x1="600" y1="410" x2="600" y2="355" stroke-width="2.5"/>
+    <g stroke-width="1">
+      <line x1="360" y1="324" x2="360" y2="269"/>
+      <line x1="400" y1="338" x2="400" y2="283"/>
+      <line x1="440" y1="353" x2="440" y2="298"/>
+      <line x1="480" y1="367" x2="480" y2="312"/>
+      <line x1="520" y1="381" x2="520" y2="326"/>
+      <line x1="560" y1="396" x2="560" y2="341"/>
+    </g>
+
+    <!-- ===== Paddle standing vertically (handle down on table, forehand facing viewer) ===== -->
+    <!-- contact ellipse on the table surface (in-plane) -->
+    <ellipse cx="470" cy="452" rx="30" ry="9"
+             transform="rotate(20 470 452)" stroke-width="1.5"/>
+    <!-- handle -->
+    <rect x="452" y="356" width="36" height="100" rx="16" ry="16" fill="white" stroke-width="3"/>
+    <!-- blade (upright, facing the viewer) -->
+    <ellipse cx="470" cy="286" rx="86" ry="96" fill="white" stroke-width="3.5"/>
+    <!-- upward arrow hint (tip points up) -->
+    <g stroke-width="2.5">
+      <line x1="612" y1="300" x2="612" y2="210"/>
+      <polyline points="600,226 612,206 624,226"/>
+    </g>
+    <!-- label -->
+    <text x="470" y="286" text-anchor="middle" dominant-baseline="central"
+          fill="black" stroke="none"
+          font-family="Helvetica, Arial, sans-serif" font-size="26" font-weight="600">
+      <tspan x="470" dy="-14">forehand</tspan>
+      <tspan x="470" dy="30">side</tspan>
+    </text>
+
+  </g>
+</svg>
