@@ -25,7 +25,7 @@ const uint8_t UART_TX_UUID[16] = {
   0x93, 0xF3, 0xA3, 0xB5, 0x03, 0x00, 0x40, 0x6E};
 // Firmware version string, exposed as a READ characteristic (UUID ...0004...)
 // so the app can show it on connect. Bump on firmware changes (1.0, 1.1, ...).
-#define FW_VERSION "1.2"
+#define FW_VERSION "1.3"
 const uint8_t UART_VER_UUID[16] = {
   0x9E, 0xCA, 0xDC, 0x24, 0x0E, 0xE5, 0xA9, 0xE0,
   0x93, 0xF3, 0xA3, 0xB5, 0x04, 0x00, 0x40, 0x6E};
@@ -38,18 +38,21 @@ BLECharacteristic verChar(UART_VER_UUID);
 // Batched notification buffer (firmware v1.1 packet)
 //   bytes 0..3 : uint32 LE  first-sample index (cumulative; resets on connect)
 //   bytes 4..7 : uint32 LE  first-sample timestamp = micros() from the chip
-//   byte  8    : battery % in bits 0..6; bit 7 = charging flag (fw >= 1.2)
+//   byte  8    : battery % in bits 0..6; bit 7 = charging flag (fw >= 1.3)
 //   byte  9    : number of samples N in this packet
+//   bytes 10..11 : uint16 LE  battery millivolts (fw >= 1.3; 0 if unread)
 //   then N * 12 bytes: int16 LE  ax, ay, az, gx, gy, gz  (raw sensor counts)
-// The 10-byte header lets the app reconstruct exact per-sample times from the
+// The 12-byte header lets the app reconstruct exact per-sample times from the
 // chip clock and detect dropped samples (a jump in the index). The app applies
 // the LSM6DS3 sensitivities (accel +/-16g, gyro 2000 dps).
-// While charging (fw >= 1.2) the board does NOT stream IMU data: it sends a
-// header-only status packet (N = 0, battery byte bit 7 set) ~2 Hz instead, so
-// the app can show a dedicated charging state with a live (rising) battery %.
+// Byte 8's coarse % stays for backward compatibility; fw >= 1.3 also sends the
+// raw millivolts (bytes 10..11) so the app can map SoC on a real LiPo curve at
+// sub-1% resolution. While charging (fw >= 1.3) the board does NOT stream IMU
+// data: it sends a header-only status packet (N = 0, battery byte bit 7 set,
+// plus the mV) ~2 Hz instead, so the app shows a dedicated charging state.
 // =====================================================
-#define PKT_HEADER    10
-#define MAX_SAMPLES   19              // 10 + 19*12 = 238 bytes, fits a 247-byte MTU
+#define PKT_HEADER    12
+#define MAX_SAMPLES   19              // 12 + 19*12 = 240 bytes, fits a 247-byte MTU
 #define SAMPLE_BYTES  12
 static uint8_t  txbuf[PKT_HEADER + MAX_SAMPLES * SAMPLE_BYTES];
 static uint16_t sampleCount = 0;
@@ -65,6 +68,7 @@ static uint32_t packetFirstMicros = 0; // micros() of this packet's first sample
 
 volatile bool connected = false;
 int      batteryPct   = 100;
+uint16_t batteryMv    = 0;       // raw cell millivolts (fw >= 1.3 packet field)
 uint32_t lastBattUs   = 0;
 bool     charging     = false;   // refreshed from PIN_CHARGE_STATE each loop
 uint32_t lastStatusMs = 0;       // cadence for charging-status packets
@@ -159,9 +163,15 @@ void loop() {
   if (nowUs - lastBattUs > 2000000UL) {
     digitalWrite(VBAT_ENABLE, LOW);   // enable divider (active low)
     delay(2);
-    int rawADC = analogRead(PIN_VBAT);
+    // Oversample: one analogRead carries the full ADC noise, so average 64 of
+    // them (~8x less noise, still well under 1 ms) before scaling to volts.
+    uint32_t acc = 0;
+    for (int i = 0; i < 64; i++) acc += analogRead(PIN_VBAT);
     digitalWrite(VBAT_ENABLE, HIGH);
+    float rawADC = acc / 64.0f;
     float vbat = (rawADC / 4096.0f) * 3.6f * (1510.0f / 510.0f);
+    batteryMv = (uint16_t)(vbat * 1000.0f);   // raw mV -> app maps SoC on a LiPo curve
+    // Coarse % kept for older apps; the app prefers the mV field when present.
     int pct = (int)(((vbat - 3.2f) / (4.2f - 3.2f)) * 100.0f);
     batteryPct = constrain(pct, 0, 100);
     lastBattUs = nowUs;
@@ -186,6 +196,7 @@ void loop() {
       memset(txbuf, 0, PKT_HEADER);
       txbuf[8] = (uint8_t)(batteryPct | 0x80);  // bit7 = charging
       txbuf[9] = 0;                             // N = 0 (no samples)
+      memcpy(&txbuf[10], &batteryMv, 2);        // raw cell mV
       txChar.notify(txbuf, PKT_HEADER);
       lastStatusMs = nowMs;
     }
@@ -227,6 +238,7 @@ void loop() {
     memcpy(&txbuf[4], &packetFirstMicros, 4);  // uint32 LE first-sample micros
     txbuf[8] = (uint8_t)batteryPct;
     txbuf[9] = (uint8_t)sampleCount;
+    memcpy(&txbuf[10], &batteryMv, 2);         // raw cell mV
     uint16_t len = PKT_HEADER + sampleCount * SAMPLE_BYTES;
     if (txChar.notify(txbuf, len)) {
       sampleCount = 0;

@@ -35,9 +35,15 @@ mixin _BleScreenCore
   String _batteryPct = "--";
   double _batterySmoothed = -1; // EMA of the raw byte (-1 = no reading yet)
   int _batteryShown = -1; // displayed %, monotonically non-increasing
-  // Board reports it is charging (fw >= 1.2). While set, the paddle stops
+  // Board reports it is charging (fw >= 1.3). While set, the paddle stops
   // streaming IMU data and the % is allowed to rise (the never-rise clamp off).
   bool _charging = false;
+  // Time-to-full estimate (charging only). We fit the SMOOTHED % against time
+  // over a trailing window and extrapolate to 100%, rather than differencing
+  // consecutive samples — that keeps jumpy voltage from wrecking the slope.
+  final List<(double, double)> _chargeSamples = []; // (elapsed s, smoothed %)
+  final Stopwatch _chargeStopwatch = Stopwatch();
+  String _timeToFull = "—";
 
   // Orientation + velocity estimator (sensor fusion), fed every sample.
   final MotionEstimator _motion = MotionEstimator();
@@ -688,29 +694,41 @@ mixin _BleScreenCore
     return maj > major || (maj == major && min >= minor);
   }
 
-  // Batched binary packet. Firmware >= 1.1 uses a 10-byte header
-  //   [uint32 firstSampleIndex][uint32 firstSampleMicros][battery][N]
-  // older firmware uses a 2-byte header [N][battery]; then N*12 bytes of
-  // int16 LE ax, ay, az, gx, gy, gz (raw counts).
+  // Batched binary packet. Firmware >= 1.3 uses a 12-byte header
+  //   [u32 firstSampleIndex][u32 firstSampleMicros][battery][N][u16 batteryMv]
+  // fw 1.1-1.2 use a 10-byte header (no mV); older firmware a 2-byte header
+  // [N][battery]; then N*12 bytes of int16 LE ax, ay, az, gx, gy, gz (raw counts).
   void _onPacket(List<int> value) {
     final bool chipTime = _fwAtLeast(1, 1);
-    final int hdr = chipTime ? 10 : 2;
+    final bool fineBatt = _fwAtLeast(1, 3); // raw mV field in the header
+    final int hdr = fineBatt ? 12 : (chipTime ? 10 : 2);
     if (value.length < hdr) return;
     final bd = ByteData.view(Uint8List.fromList(value).buffer);
     final int count = chipTime ? value[9] : value[0];
     final int battByte = chipTime ? value[8] : value[1];
-    // Firmware >= 1.2 marks "charging" in the high bit of the battery byte and,
+    // Firmware >= 1.3 marks "charging" in the high bit of the battery byte and,
     // while charging, sends header-only status packets (N = 0, no IMU stream).
     final bool charging = (battByte & 0x80) != 0;
-    final int battPct = battByte & 0x7F;
+    // fw >= 1.3 sends raw cell millivolts -> map SoC on a real LiPo curve at
+    // sub-1% resolution; older firmware only has the coarse integer % byte.
+    final double battPct = fineBatt
+        ? _lipoPercentFromMv(bd.getUint16(10, Endian.little))
+        : (battByte & 0x7F).toDouble();
 
     if (charging || count == 0) {
-      _updateBattery(battPct, charging: charging);
-      if (!_charging || _connectionStatus != "Charging") {
+      if (!_charging) {
+        // Entering the charging state: start a fresh time-to-full history.
         _charging = true;
         _connectionStatus = "Charging";
         _sampleRateStr = "0";
+        _timeToFull = "estimating…";
+        _chargeSamples.clear();
+        _chargeStopwatch
+          ..reset()
+          ..start();
       }
+      _updateBattery(battPct, charging: true);
+      _recordChargeSample();
       return; // no IMU samples to process while charging
     }
 
@@ -719,6 +737,9 @@ mixin _BleScreenCore
     if (_charging) {
       _charging = false;
       _connectionStatus = "Streaming Data";
+      _timeToFull = "—";
+      _chargeSamples.clear();
+      _chargeStopwatch.stop();
       _haveChipRef = false;
       _windowStart = null;
       _lastChipTsec = 0;
@@ -855,12 +876,36 @@ mixin _BleScreenCore
     }
   }
 
-  // Smooth the jumpy raw battery byte and clamp the shown value so it only ever
+  // Resting open-circuit-voltage -> state-of-charge for a single LiPo cell.
+  // The mid-SoC region is inherently flat so this is approximate, but far
+  // better than a straight 3.2-4.2 V line. Linear-interpolates a standard SoC
+  // table by millivolts (charging elevates the reading, load depresses it).
+  double _lipoPercentFromMv(int mv) {
+    const List<int> mvs = [
+      3270, 3610, 3690, 3710, 3730, 3750, 3770, 3790, 3800, 3820, 3840, //
+      3850, 3870, 3910, 3950, 3980, 4020, 4080, 4110, 4150, 4200,
+    ];
+    const List<double> pcts = [
+      0, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, //
+      55, 60, 65, 70, 75, 80, 85, 90, 95, 100,
+    ];
+    if (mv <= mvs.first) return 0;
+    if (mv >= mvs.last) return 100;
+    for (int i = 1; i < mvs.length; i++) {
+      if (mv < mvs[i]) {
+        final double t = (mv - mvs[i - 1]) / (mvs[i] - mvs[i - 1]);
+        return pcts[i - 1] + t * (pcts[i] - pcts[i - 1]);
+      }
+    }
+    return 100;
+  }
+
+  // Smooth the raw battery reading and clamp the shown value so it only ever
   // decreases within a session. Seeds on the first reading, then EMA + a
   // non-increasing gate (no deadband, so it still steps down 1% at a time).
   // While [charging] the gate is lifted so the % can track the real rise.
-  void _updateBattery(int raw, {bool charging = false}) {
-    final double r = raw.clamp(0, 100).toDouble();
+  void _updateBattery(double raw, {bool charging = false}) {
+    final double r = raw.clamp(0.0, 100.0);
     if (_batterySmoothed < 0) {
       _batterySmoothed = r; // first reading seeds the filter
       _batteryShown = r.round();
@@ -873,6 +918,51 @@ mixin _BleScreenCore
       if (charging || cand < _batteryShown) _batteryShown = cand;
     }
     _batteryPct = _batteryShown.toString();
+  }
+
+  // Record one charging data point (~0.5 Hz) and refresh the time-to-full text.
+  void _recordChargeSample() {
+    final double t = _chargeStopwatch.elapsedMilliseconds / 1000.0;
+    if (_chargeSamples.isNotEmpty && t - _chargeSamples.last.$1 < 2.0) return;
+    _chargeSamples.add((t, _batterySmoothed));
+    final double cutoff = t - 150.0; // keep a ~2.5 min trailing window
+    while (_chargeSamples.length > 2 && _chargeSamples.first.$1 < cutoff) {
+      _chargeSamples.removeAt(0);
+    }
+    _timeToFull = _estimateTimeToFull();
+  }
+
+  // Least-squares slope of % vs time over the window, extrapolated to 100%.
+  // Fitting the smoothed level over minutes makes this robust to voltage noise,
+  // and it bows out gracefully ("estimating…"/"almost full") when the data is
+  // too short or too flat to trust — i.e. warm-up, or the CV taper near the top
+  // where voltage pins at ~4.2 V and any extrapolation is meaningless.
+  String _estimateTimeToFull() {
+    final double pctNow = _batterySmoothed;
+    if (pctNow >= 98) return "almost full";
+    if (_chargeSamples.length < 4) return "estimating…";
+    final double span = _chargeSamples.last.$1 - _chargeSamples.first.$1;
+    if (span < 45) return "estimating…";
+    final int n = _chargeSamples.length;
+    double sx = 0, sy = 0, sxx = 0, sxy = 0;
+    for (final s in _chargeSamples) {
+      sx += s.$1;
+      sy += s.$2;
+      sxx += s.$1 * s.$1;
+      sxy += s.$1 * s.$2;
+    }
+    final double denom = n * sxx - sx * sx;
+    if (denom.abs() < 1e-9) return "estimating…";
+    final double slope = (n * sxy - sx * sy) / denom; // % per second
+    if (slope <= 0.0008) return "estimating…"; // < ~0.05 %/min: too flat to trust
+    final double secs = (100.0 - pctNow) / slope;
+    if (secs < 60) return "< 1 min";
+    if (secs > 12 * 3600) return "estimating…";
+    final int totalMin = (secs / 60).round();
+    if (totalMin < 60) return "~$totalMin min";
+    final int h = totalMin ~/ 60;
+    final int mn = totalMin % 60;
+    return mn == 0 ? "~$h h" : "~$h h $mn min";
   }
 
   void _resetConnectionUi() {
@@ -889,6 +979,11 @@ mixin _BleScreenCore
       _batterySmoothed = -1; // fresh session -> re-seed the smoother
       _batteryShown = -1;
       _charging = false;
+      _timeToFull = "—";
+      _chargeSamples.clear();
+      _chargeStopwatch
+        ..stop()
+        ..reset();
       _firmwareVersion = "?";
       _imuData = ["0.00", "0.00", "0.00", "0.00", "0.00", "0.00"];
       _armed = false;
