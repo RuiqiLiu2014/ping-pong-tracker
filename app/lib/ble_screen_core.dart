@@ -35,6 +35,9 @@ mixin _BleScreenCore
   String _batteryPct = "--";
   double _batterySmoothed = -1; // EMA of the raw byte (-1 = no reading yet)
   int _batteryShown = -1; // displayed %, monotonically non-increasing
+  // Board reports it is charging (fw >= 1.2). While set, the paddle stops
+  // streaming IMU data and the % is allowed to rise (the never-rise clamp off).
+  bool _charging = false;
 
   // Orientation + velocity estimator (sensor fusion), fed every sample.
   final MotionEstimator _motion = MotionEstimator();
@@ -695,8 +698,34 @@ mixin _BleScreenCore
     if (value.length < hdr) return;
     final bd = ByteData.view(Uint8List.fromList(value).buffer);
     final int count = chipTime ? value[9] : value[0];
+    final int battByte = chipTime ? value[8] : value[1];
+    // Firmware >= 1.2 marks "charging" in the high bit of the battery byte and,
+    // while charging, sends header-only status packets (N = 0, no IMU stream).
+    final bool charging = (battByte & 0x80) != 0;
+    final int battPct = battByte & 0x7F;
+
+    if (charging || count == 0) {
+      _updateBattery(battPct, charging: charging);
+      if (!_charging || _connectionStatus != "Charging") {
+        _charging = true;
+        _connectionStatus = "Charging";
+        _sampleRateStr = "0";
+      }
+      return; // no IMU samples to process while charging
+    }
+
+    // Left the charging state (unplugged mid-connection): resume streaming and
+    // re-seed the chip-time base so the gap doesn't skew the timeline/rate.
+    if (_charging) {
+      _charging = false;
+      _connectionStatus = "Streaming Data";
+      _haveChipRef = false;
+      _windowStart = null;
+      _lastChipTsec = 0;
+    }
+
     if (count < 1 || value.length < hdr + count * 12) return;
-    _updateBattery(chipTime ? value[8] : value[1]);
+    _updateBattery(battPct, charging: false);
 
     final now = DateTime.now();
     _windowStart ??= now;
@@ -829,7 +858,8 @@ mixin _BleScreenCore
   // Smooth the jumpy raw battery byte and clamp the shown value so it only ever
   // decreases within a session. Seeds on the first reading, then EMA + a
   // non-increasing gate (no deadband, so it still steps down 1% at a time).
-  void _updateBattery(int raw) {
+  // While [charging] the gate is lifted so the % can track the real rise.
+  void _updateBattery(int raw, {bool charging = false}) {
     final double r = raw.clamp(0, 100).toDouble();
     if (_batterySmoothed < 0) {
       _batterySmoothed = r; // first reading seeds the filter
@@ -838,7 +868,9 @@ mixin _BleScreenCore
       _batterySmoothed =
           _batteryAlpha * r + (1 - _batteryAlpha) * _batterySmoothed;
       final int cand = _batterySmoothed.round();
-      if (cand < _batteryShown) _batteryShown = cand; // never rise
+      // Normally batteries only discharge, so a bounce-up is noise -> clamp.
+      // Charging is the one time a rise is real, so allow it then.
+      if (charging || cand < _batteryShown) _batteryShown = cand;
     }
     _batteryPct = _batteryShown.toString();
   }
@@ -856,6 +888,7 @@ mixin _BleScreenCore
       _batteryPct = "--";
       _batterySmoothed = -1; // fresh session -> re-seed the smoother
       _batteryShown = -1;
+      _charging = false;
       _firmwareVersion = "?";
       _imuData = ["0.00", "0.00", "0.00", "0.00", "0.00", "0.00"];
       _armed = false;

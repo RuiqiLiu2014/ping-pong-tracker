@@ -20,7 +20,7 @@ part 'ble_screen_core.dart';
 part 'ble_screen_ui.dart';
 
 // App version, shown top-right. Bump on app changes (1.0, 1.1, ...).
-const String kAppVersion = "1.2";
+const String kAppVersion = "1.3";
 
 // Shared constants (top-level so both part-file mixins can see them).
 const double _batteryAlpha = 0.02; // EMA weight (~0.6 s at ~80 pkt/s)

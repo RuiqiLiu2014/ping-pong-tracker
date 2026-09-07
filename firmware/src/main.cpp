@@ -25,7 +25,7 @@ const uint8_t UART_TX_UUID[16] = {
   0x93, 0xF3, 0xA3, 0xB5, 0x03, 0x00, 0x40, 0x6E};
 // Firmware version string, exposed as a READ characteristic (UUID ...0004...)
 // so the app can show it on connect. Bump on firmware changes (1.0, 1.1, ...).
-#define FW_VERSION "1.1"
+#define FW_VERSION "1.2"
 const uint8_t UART_VER_UUID[16] = {
   0x9E, 0xCA, 0xDC, 0x24, 0x0E, 0xE5, 0xA9, 0xE0,
   0x93, 0xF3, 0xA3, 0xB5, 0x04, 0x00, 0x40, 0x6E};
@@ -38,12 +38,15 @@ BLECharacteristic verChar(UART_VER_UUID);
 // Batched notification buffer (firmware v1.1 packet)
 //   bytes 0..3 : uint32 LE  first-sample index (cumulative; resets on connect)
 //   bytes 4..7 : uint32 LE  first-sample timestamp = micros() from the chip
-//   byte  8    : battery %
+//   byte  8    : battery % in bits 0..6; bit 7 = charging flag (fw >= 1.2)
 //   byte  9    : number of samples N in this packet
 //   then N * 12 bytes: int16 LE  ax, ay, az, gx, gy, gz  (raw sensor counts)
 // The 10-byte header lets the app reconstruct exact per-sample times from the
 // chip clock and detect dropped samples (a jump in the index). The app applies
 // the LSM6DS3 sensitivities (accel +/-16g, gyro 2000 dps).
+// While charging (fw >= 1.2) the board does NOT stream IMU data: it sends a
+// header-only status packet (N = 0, battery byte bit 7 set) ~2 Hz instead, so
+// the app can show a dedicated charging state with a live (rising) battery %.
 // =====================================================
 #define PKT_HEADER    10
 #define MAX_SAMPLES   19              // 10 + 19*12 = 238 bytes, fits a 247-byte MTU
@@ -55,9 +58,16 @@ static uint32_t sampleIndexTotal = 0;  // cumulative samples since connect
 static uint32_t packetFirstIndex = 0;  // index of this packet's first sample
 static uint32_t packetFirstMicros = 0; // micros() of this packet's first sample
 
+// Charge-status input from the BQ25101 (the line that drives the on-board CHG
+// LED). P0.17 / Arduino pin 23 on the XIAO nRF52840; it reads LOW while the
+// battery is charging and HIGH otherwise (open-drain, so we pull it up).
+#define PIN_CHARGE_STATE 23
+
 volatile bool connected = false;
-int      batteryPct  = 100;
-uint32_t lastBattUs  = 0;
+int      batteryPct   = 100;
+uint32_t lastBattUs   = 0;
+bool     charging     = false;   // refreshed from PIN_CHARGE_STATE each loop
+uint32_t lastStatusMs = 0;       // cadence for charging-status packets
 
 void connectCallback(uint16_t connHandle) {
   BLEConnection* conn = Bluefruit.Connection(connHandle);
@@ -105,6 +115,7 @@ void setup() {
   pinMode(VBAT_ENABLE, OUTPUT);
   analogReadResolution(12);
   digitalWrite(VBAT_ENABLE, HIGH);   // divider off until we sample
+  pinMode(PIN_CHARGE_STATE, INPUT_PULLUP);  // open-drain CHG line; LOW = charging
 
   // ---- BLE ----
   Bluefruit.configPrphBandwidth(BANDWIDTH_MAX);   // must precede begin()
@@ -156,8 +167,29 @@ void loop() {
     lastBattUs = nowUs;
   }
 
+  // Charge-status line (LOW = charging). Cheap to poll every loop.
+  charging = (digitalRead(PIN_CHARGE_STATE) == LOW);
+
   if (!connected) {
     delay(1);
+    return;
+  }
+
+  // ---- Charging: do NOT stream IMU. Send a small header-only status packet
+  // ~2 Hz (N = 0, battery byte bit 7 set) so the app shows a dedicated charging
+  // state and a live battery %. Not streaming also frees the ~50 mA charge
+  // current to actually fill the cell instead of running the sensor+radio. ----
+  if (charging) {
+    sampleCount = 0;                        // drop any half-filled stream batch
+    uint32_t nowMs = millis();
+    if (nowMs - lastStatusMs >= 500) {
+      memset(txbuf, 0, PKT_HEADER);
+      txbuf[8] = (uint8_t)(batteryPct | 0x80);  // bit7 = charging
+      txbuf[9] = 0;                             // N = 0 (no samples)
+      txChar.notify(txbuf, PKT_HEADER);
+      lastStatusMs = nowMs;
+    }
+    delay(5);
     return;
   }
 
