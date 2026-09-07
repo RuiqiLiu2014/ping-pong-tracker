@@ -151,12 +151,13 @@ class _CalibrationWizardState extends State<CalibrationWizard> {
                       else
                         Padding(
                           padding: const EdgeInsets.only(bottom: 24),
-                          child: ClipRRect(
-                            borderRadius: BorderRadius.circular(16),
-                            child: SvgPicture.asset(
-                              _stepAsset,
-                              height: 230,
-                              fit: BoxFit.contain,
+                          child: SvgPicture.asset(
+                            _stepAsset,
+                            height: 230,
+                            fit: BoxFit.contain,
+                            colorFilter: ColorFilter.mode(
+                              Theme.of(context).colorScheme.onSurface,
+                              BlendMode.srcIn,
                             ),
                           ),
                         ),
