@@ -40,7 +40,7 @@ mixin _BleScreenUi on _BleScreenCore {
                       "app v$kAppVersion",
                       style: const TextStyle(fontSize: 11),
                     ),
-                    if (_connectionStatus == "Streaming Data")
+                    if (_connectionStatus == "Streaming Data" || _charging)
                       Text(
                         "fw v$_firmwareVersion",
                         style: const TextStyle(fontSize: 11),
@@ -77,7 +77,7 @@ mixin _BleScreenUi on _BleScreenCore {
   // Compact iPhone-style battery gauge: percentage in front of a small
   // horizontal cell. Fill and text are tinted by level for at-a-glance reading
   // (a darker text shade keeps the number legible over the tab background).
-  Widget _batteryIndicator(int pct) {
+  Widget _batteryIndicator(int pct, {bool charging = false}) {
     final p = pct.clamp(0, 100);
     final Color fill = p <= 20
         ? Colors.red
@@ -98,24 +98,38 @@ mixin _BleScreenUi on _BleScreenCore {
           ),
         ),
         const SizedBox(width: 5),
-        Container(
-          width: 32,
-          height: 15,
-          padding: const EdgeInsets.all(1.5),
-          decoration: BoxDecoration(
-            border: Border.all(color: outline, width: 1.2),
-            borderRadius: BorderRadius.circular(3),
-          ),
-          child: FractionallySizedBox(
-            alignment: Alignment.centerLeft,
-            widthFactor: p / 100.0,
-            child: Container(
+        Stack(
+          alignment: Alignment.center,
+          children: [
+            Container(
+              width: 32,
+              height: 15,
+              padding: const EdgeInsets.all(1.5),
               decoration: BoxDecoration(
-                color: fill,
-                borderRadius: BorderRadius.circular(1.5),
+                border: Border.all(color: outline, width: 1.2),
+                borderRadius: BorderRadius.circular(3),
+              ),
+              child: FractionallySizedBox(
+                alignment: Alignment.centerLeft,
+                widthFactor: p / 100.0,
+                child: Container(
+                  decoration: BoxDecoration(
+                    color: fill,
+                    borderRadius: BorderRadius.circular(1.5),
+                  ),
+                ),
               ),
             ),
-          ),
+            // Charging bolt, centred over the cell, with a shadow so it reads
+            // over both the coloured fill and the empty background.
+            if (charging)
+              const Icon(
+                Icons.bolt,
+                size: 13,
+                color: Colors.white,
+                shadows: [Shadow(color: Colors.black87, blurRadius: 2)],
+              ),
+          ],
         ),
         // terminal nub
         Container(
@@ -135,6 +149,7 @@ mixin _BleScreenUi on _BleScreenCore {
 
   Widget _buildConnectionTab() {
     final streaming = _connectionStatus == "Streaming Data";
+    final charging = _charging;
     final m = _motion;
     final String orientationText = m.calibrated
         ? "Roll: ${m.roll.toStringAsFixed(0)}°   Pitch: ${m.pitch.toStringAsFixed(0)}°"
@@ -151,17 +166,21 @@ mixin _BleScreenUi on _BleScreenCore {
             style: TextStyle(
               fontSize: 18,
               fontWeight: FontWeight.bold,
-              color: streaming ? Colors.green : Colors.red,
+              color: (streaming || charging) ? Colors.green : Colors.red,
             ),
           ),
           const SizedBox(height: 10),
           Text(
-            "Sample Rate: $_sampleRateStr Hz",
+            // TODO: estimate time-to-full from the charging rate (placeholder).
+            charging ? "Time to full: —" : "Sample Rate: $_sampleRateStr Hz",
             style: const TextStyle(fontSize: 16, color: Colors.grey),
           ),
-          if (streaming) ...[
+          if (streaming || charging) ...[
             const SizedBox(height: 10),
-            _batteryIndicator(int.tryParse(_batteryPct) ?? 0),
+            _batteryIndicator(
+              int.tryParse(_batteryPct) ?? 0,
+              charging: charging,
+            ),
           ],
           const SizedBox(height: 28),
           const Text(
