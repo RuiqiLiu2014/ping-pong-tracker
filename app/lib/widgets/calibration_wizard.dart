@@ -194,10 +194,10 @@ class _CalibrationWizardState extends State<CalibrationWizard> {
                         )
                       else
                         Padding(
-                          padding: const EdgeInsets.only(bottom: 24),
+                          padding: const EdgeInsets.only(bottom: 44),
                           child: SvgPicture.asset(
                             _stepAsset,
-                            height: 230,
+                            height: 270,
                             fit: BoxFit.contain,
                             colorFilter: ColorFilter.mode(
                               Theme.of(context).colorScheme.onSurface,
@@ -231,9 +231,8 @@ class _CalibrationWizardState extends State<CalibrationWizard> {
                         const Padding(
                           padding: EdgeInsets.only(top: 12),
                           child: Text(
-                            "Keep the whole face flat on the table — the handle "
-                            "is thicker than the face, so letting the handle "
-                            "base rest down too can tilt the measurement.",
+                            "Keep the handle hanging off the edge as it is "
+                            "thicker than the face",
                             textAlign: TextAlign.center,
                             style: TextStyle(fontSize: 13, color: Colors.grey),
                           ),
