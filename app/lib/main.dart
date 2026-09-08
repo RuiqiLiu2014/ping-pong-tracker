@@ -55,6 +55,10 @@ const String _kLeverDirXKey = "leverDirX";
 const String _kLeverDirYKey = "leverDirY";
 const String _kLeverDirZKey = "leverDirZ";
 const String _kLogSeqKey = "logSeq"; // last issued log number
+// Hits + swings recorded since the last calibration; both jostle the sensor
+// mounting, so once this crosses the threshold we nudge the user to recalibrate.
+const String _kUseSinceCalKey = "useSinceCal";
+const int kCalReminderUses = 1500;
 const List<Color> _accelColors = [Colors.red, Colors.green, Colors.blue];
 const List<Color> _gyroColors = [Colors.orange, Colors.purple, Colors.teal];
 const List<String> _accelLabels = ["ax", "ay", "az"];
