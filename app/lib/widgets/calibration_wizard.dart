@@ -26,7 +26,15 @@ class CalibrationWizard extends StatefulWidget {
   State<CalibrationWizard> createState() => _CalibrationWizardState();
 }
 
-enum _Step { faceUp, faceUpRunning, lever, leverRunning, done }
+enum _Step {
+  faceUp,
+  faceUpRunning,
+  faceUpReview,
+  lever,
+  leverRunning,
+  leverReview,
+  done,
+}
 
 class _CalibrationWizardState extends State<CalibrationWizard> {
   _Step _step = _Step.faceUp;
@@ -55,10 +63,16 @@ class _CalibrationWizardState extends State<CalibrationWizard> {
     if (!mounted) return;
     setState(() {
       if (_step == _Step.faceUpRunning && !widget.motion.calibrating) {
-        _step = _Step.lever; // face-up finished -> next pose
+        // Face-up finished. If the pose looks off, pause on a review step so the
+        // user can recalibrate or continue; otherwise go straight to the lever.
+        _step = (widget.motion.hasFaceNormal && !widget.motion.faceNormalValid)
+            ? _Step.faceUpReview
+            : _Step.lever;
       } else if (_step == _Step.leverRunning &&
           !widget.motion.calibratingLever) {
-        _step = _Step.done;
+        // Vertical finished. If the pose looks off (e.g. upside down), pause on
+        // a review step so the user can redo it; otherwise finish.
+        _step = widget.motion.leverDirValid ? _Step.done : _Step.leverReview;
       }
     });
     if (_step == _Step.done && !_closeScheduled) {
@@ -81,6 +95,26 @@ class _CalibrationWizardState extends State<CalibrationWizard> {
     });
   }
 
+  // Face-up pose looked off: either redo it, or accept it and move on.
+  void _recalibrateFaceUp() {
+    setState(() {
+      widget.motion.startCalibration();
+      _step = _Step.faceUpRunning;
+    });
+  }
+
+  void _continueToLever() => setState(() => _step = _Step.lever);
+
+  // Vertical pose looked off: either redo it, or accept it and finish.
+  void _recalibrateLever() {
+    setState(() {
+      widget.motion.startLeverCalibration();
+      _step = _Step.leverRunning;
+    });
+  }
+
+  void _continueToDone() => setState(() => _step = _Step.done);
+
   void _close() {
     widget.motion.cancelCalibration();
     Navigator.of(context).maybePop();
@@ -99,9 +133,11 @@ class _CalibrationWizardState extends State<CalibrationWizard> {
     switch (_step) {
       case _Step.faceUp:
       case _Step.faceUpRunning:
+      case _Step.faceUpReview:
         return "Place flat on table, forehand face up";
       case _Step.lever:
       case _Step.leverRunning:
+      case _Step.leverReview:
         return "Stand paddle vertically";
       case _Step.done:
         return "Done calibrating!";
@@ -109,7 +145,11 @@ class _CalibrationWizardState extends State<CalibrationWizard> {
   }
 
   int get _stepNumber =>
-      (_step == _Step.faceUp || _step == _Step.faceUpRunning) ? 1 : 2;
+      (_step == _Step.faceUp ||
+          _step == _Step.faceUpRunning ||
+          _step == _Step.faceUpReview)
+      ? 1
+      : 2;
 
   // Illustration for the current step (sketch of the required paddle pose).
   String get _stepAsset => _stepNumber == 1
@@ -173,6 +213,31 @@ class _CalibrationWizardState extends State<CalibrationWizard> {
                           fontWeight: FontWeight.w600,
                         ),
                       ),
+                      if (_step == _Step.faceUpReview ||
+                          _step == _Step.leverReview)
+                        const Padding(
+                          padding: EdgeInsets.only(top: 12),
+                          child: Text(
+                            "Warning: pose looks off",
+                            textAlign: TextAlign.center,
+                            style: TextStyle(
+                              fontSize: 18,
+                              fontWeight: FontWeight.w600,
+                              color: Colors.orange,
+                            ),
+                          ),
+                        ),
+                      if (_stepNumber == 1)
+                        const Padding(
+                          padding: EdgeInsets.only(top: 12),
+                          child: Text(
+                            "Keep the whole face flat on the table — the handle "
+                            "is thicker than the face, so letting the handle "
+                            "base rest down too can tilt the measurement.",
+                            textAlign: TextAlign.center,
+                            style: TextStyle(fontSize: 13, color: Colors.grey),
+                          ),
+                        ),
                     ],
                   ),
                 ),
@@ -204,22 +269,61 @@ class _CalibrationWizardState extends State<CalibrationWizard> {
                         : null,
                   ),
                   const SizedBox(height: 16),
-                  SizedBox(
-                    width: double.infinity,
-                    child: ElevatedButton(
-                      onPressed: (_running || done || !widget.canCalibrate)
-                          ? null
-                          : _onCalibrate,
-                      style: ElevatedButton.styleFrom(
-                        foregroundColor: btnText,
-                        padding: const EdgeInsets.symmetric(vertical: 16),
-                      ),
-                      child: Text(
-                        _running ? "Calibrating…" : "Calibrate",
-                        style: const TextStyle(fontSize: 18),
+                  if (_step == _Step.faceUpReview ||
+                      _step == _Step.leverReview)
+                    // Pose looked off: let the user redo it or accept and go on.
+                    Row(
+                      children: [
+                        Expanded(
+                          child: OutlinedButton(
+                            onPressed: _step == _Step.faceUpReview
+                                ? _recalibrateFaceUp
+                                : _recalibrateLever,
+                            style: OutlinedButton.styleFrom(
+                              foregroundColor: btnText,
+                              padding: const EdgeInsets.symmetric(vertical: 16),
+                            ),
+                            child: const Text(
+                              "Recalibrate",
+                              style: TextStyle(fontSize: 18),
+                            ),
+                          ),
+                        ),
+                        const SizedBox(width: 12),
+                        Expanded(
+                          child: ElevatedButton(
+                            onPressed: _step == _Step.faceUpReview
+                                ? _continueToLever
+                                : _continueToDone,
+                            style: ElevatedButton.styleFrom(
+                              foregroundColor: btnText,
+                              padding: const EdgeInsets.symmetric(vertical: 16),
+                            ),
+                            child: const Text(
+                              "Continue",
+                              style: TextStyle(fontSize: 18),
+                            ),
+                          ),
+                        ),
+                      ],
+                    )
+                  else
+                    SizedBox(
+                      width: double.infinity,
+                      child: ElevatedButton(
+                        onPressed: (_running || done || !widget.canCalibrate)
+                            ? null
+                            : _onCalibrate,
+                        style: ElevatedButton.styleFrom(
+                          foregroundColor: btnText,
+                          padding: const EdgeInsets.symmetric(vertical: 16),
+                        ),
+                        child: Text(
+                          _running ? "Calibrating…" : "Calibrate",
+                          style: const TextStyle(fontSize: 18),
+                        ),
                       ),
                     ),
-                  ),
                 ],
               ),
             ),
