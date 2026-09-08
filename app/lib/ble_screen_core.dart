@@ -889,15 +889,24 @@ mixin _BleScreenCore
       0, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, //
       55, 60, 65, 70, 75, 80, 85, 90, 95, 100,
     ];
-    if (mv <= mvs.first) return 0;
-    if (mv >= mvs.last) return 100;
-    for (int i = 1; i < mvs.length; i++) {
-      if (mv < mvs[i]) {
-        final double t = (mv - mvs[i - 1]) / (mvs[i] - mvs[i - 1]);
-        return pcts[i - 1] + t * (pcts[i] - pcts[i - 1]);
+    double raw;
+    if (mv <= mvs.first) {
+      raw = 0;
+    } else if (mv >= mvs.last) {
+      raw = 100;
+    } else {
+      raw = 100;
+      for (int i = 1; i < mvs.length; i++) {
+        if (mv < mvs[i]) {
+          final double t = (mv - mvs[i - 1]) / (mvs[i] - mvs[i - 1]);
+          raw = pcts[i - 1] + t * (pcts[i] - pcts[i - 1]);
+          break;
+        }
       }
     }
-    return 100;
+    // The charger reports "full" (and the board stops charging) at ~92% on the
+    // raw curve, so stretch the scale so a full cell reads 100%.
+    return (raw * (100.0 / 92.0)).clamp(0.0, 100.0);
   }
 
   // Smooth the raw battery reading and clamp the shown value so it only ever
