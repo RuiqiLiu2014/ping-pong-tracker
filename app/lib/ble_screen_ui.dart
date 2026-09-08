@@ -1438,8 +1438,26 @@ mixin _BleScreenUi on _BleScreenCore {
             ),
           ),
         ],
+        const Divider(height: 24),
+        const Text(
+          "Storage",
+          style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+        ),
+        const SizedBox(height: 4),
+        Text(
+          "${_logs.length} log${_logs.length == 1 ? '' : 's'} using "
+          "${_formatStorage(_logStorageBytes)} of phone storage.",
+          style: const TextStyle(color: Colors.grey),
+        ),
       ],
     );
+  }
+
+  // Human-readable log storage size. Bytes shown in KB below 1 MB, MB above.
+  String _formatStorage(int bytes) {
+    final double kb = bytes / 1024.0;
+    if (kb < 1024) return "${kb.toStringAsFixed(1)} KB";
+    return "${(kb / 1024).toStringAsFixed(1)} MB";
   }
 
   List<Widget> _paddleSpeedSettings() {
