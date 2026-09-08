@@ -194,9 +194,9 @@ mixin _BleScreenUi on _BleScreenCore {
   Widget _buildConnectionTab() {
     final streaming = _connectionStatus == "Streaming Data";
     final charging = _charging;
-    // Connected (so Connect flips to Disconnect) even when the firmware is too
-    // old to stream — that state still holds an active BLE link.
-    final connected = streaming || _fwOutdated;
+    // Connected (so Connect flips to Disconnect) whenever a BLE link is held —
+    // streaming, charging, or firmware-too-old-to-stream.
+    final connected = streaming || charging || _fwOutdated;
     final m = _motion;
     final String orientationText = m.calibrated
         ? "Roll: ${m.roll.toStringAsFixed(0)}°   Pitch: ${m.pitch.toStringAsFixed(0)}°"
@@ -275,7 +275,7 @@ mixin _BleScreenUi on _BleScreenCore {
             ),
           const SizedBox(height: 14),
           OutlinedButton.icon(
-            onPressed: _fwOutdated ? null : _openCalibration,
+            onPressed: (charging || _fwOutdated) ? null : _openCalibration,
             icon: const Icon(Icons.explore),
             label: const Text("Calibrate"),
           ),

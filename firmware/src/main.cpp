@@ -75,13 +75,13 @@ uint32_t lastStatusMs = 0;       // cadence for charging-status packets
 
 // ---- Status LED (onboard user RGB, driven manually; Bluefruit auto-LED off) ----
 // Colour encodes power/charge state; blink encodes BLE. On this board the dies
-// are active-HIGH (variant's LED_STATE_ON == 1); ~50% brightness via PWM. Only
-// one die is ever lit, so colours never blend.
+// are active-LOW (pin LOW = lit) — the variant's LED_STATE_ON is wrong, so we
+// don't use it. ~50% brightness via PWM. Only one die is ever lit, no blending.
 //   green  = charging          blue = on & running (on battery)
 //   red    = low battery       off  = charge complete (plugged) / powered down
 //   blink  = BLE searching     solid = BLE connected
 #define LED_BLINK_MS  300    // half-period of the searching / charging flash
-#define LED_DUTY_50   128    // ~50% duty ≈ 50% brightness (symmetric either polarity)
+#define LED_DUTY_50   128    // active-low: ~50% duty ≈ 50% brightness (lower = brighter)
 #define BATT_LOW_MV   3730   // low-battery: matches the app's red threshold (LiPo 20%)
 #define BATT_LOW_CLR  3770   // hysteresis: clear "low" only once back above this
 bool lowBatt = false;
@@ -126,9 +126,9 @@ void sampleBattery() {
   batteryPct = constrain(pct, 0, 100);
 }
 
-// Drive one LED die: on -> ~50% brightness, off -> fully off (active-HIGH here).
+// Drive one LED die (active-LOW): lit -> ~50% duty, off -> held HIGH (255).
 static inline void ledDie(uint8_t pin, bool on) {
-  analogWrite(pin, on ? LED_DUTY_50 : (LED_STATE_ON ? 0 : 255));
+  analogWrite(pin, on ? LED_DUTY_50 : 255);
 }
 
 // Light exactly one colour (or none) — one die at a time, so nothing blends.
@@ -257,7 +257,7 @@ void loop() {
   if (charging) {
     sampleCount = 0;                        // drop any half-filled stream batch
     uint32_t nowMs = millis();
-    if (nowMs - lastStatusMs >= 500) {
+    if (nowMs - lastStatusMs >= 1000) {     // ~1 Hz status while charging (low rate)
       memset(txbuf, 0, PKT_HEADER);
       txbuf[8] = (uint8_t)(batteryPct | 0x80);  // bit7 = charging
       txbuf[9] = 0;                             // N = 0 (no samples)
