@@ -284,16 +284,6 @@ mixin _BleScreenUi on _BleScreenCore {
             icon: const Icon(Icons.explore),
             label: const Text("Calibrate"),
           ),
-          if (m.hasFaceNormal && !m.faceNormalValid)
-            const Padding(
-              padding: EdgeInsets.only(top: 6),
-              child: Text(
-                "Face-up pose looks off — recalibrate with the forehand face "
-                "pointing straight up.",
-                textAlign: TextAlign.center,
-                style: TextStyle(fontSize: 12, color: Colors.orange),
-              ),
-            ),
           const SizedBox(height: 8),
           ElevatedButton(
             onPressed: _isConnecting || connected

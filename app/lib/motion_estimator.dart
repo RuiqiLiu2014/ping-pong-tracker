@@ -97,15 +97,15 @@ class MotionEstimator {
   List<double>? get faceNormal =>
       _faceNormal == null ? null : List<double>.of(_faceNormal!);
 
-  /// True when the captured normal looks like a genuine face-up pose: roughly
-  /// perpendicular to the handle axis (i.e. the user didn't hold the handle up,
-  /// which would make the split degenerate).
+  /// True when the flat ("forehand face up") pose looks right. The board is
+  /// mounted flat against the paddle base with its +Z along the handle, so in
+  /// the flat pose gravity lies in the face plane and the captured normal should
+  /// have almost no Z component. The sensor's in-plane (X/Y) rotation is
+  /// arbitrary per mounting, so we can only check that Z is near zero.
   bool get faceNormalValid {
     final n = _faceNormal;
     if (n == null) return false;
-    final double dotHandle =
-        n[0] * _rDir[0] + n[1] * _rDir[1] + n[2] * _rDir[2];
-    return dotHandle.abs() < 0.5; // handle axis should lie in the face plane
+    return n[2].abs() < 0.4; // gravity ~perpendicular to board Z when flat
   }
 
   /// Set the face normal directly (restored from storage, or for log replay).
@@ -121,6 +121,12 @@ class MotionEstimator {
   /// Tilt of the calibrated lever direction from the default board +Z, in
   /// degrees — a "how far off is the mounting" readout (0 = perfectly aligned).
   double get leverTiltDeg => math.acos(_rDir[2].clamp(-1.0, 1.0)) * _rad2deg;
+
+  /// True when the vertical ("tip up") pose looks right: the board's Z runs
+  /// along the handle, and with the tip up gravity reads ~-Z (measured: Z≈-0.99).
+  /// So the lever dir should point mostly along -Z. Catches an upside-down paddle
+  /// (gravity would read +Z) and not-actually-vertical poses.
+  bool get leverDirValid => _rDir[2] < -0.7;
 
   /// Set the sensor->tip direction directly (restored from storage or replay).
   void setLeverDir(double x, double y, double z) {
