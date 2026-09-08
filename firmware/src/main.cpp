@@ -76,12 +76,15 @@ uint32_t lastStatusMs = 0;       // cadence for charging-status packets
 // ---- Status LED (onboard user RGB, driven manually; Bluefruit auto-LED off) ----
 // Colour encodes power/charge state; blink encodes BLE. On this board the dies
 // are active-LOW (pin LOW = lit) — the variant's LED_STATE_ON is wrong, so we
-// don't use it. ~50% brightness via PWM. Only one die is ever lit, no blending.
-//   green  = charging          blue = on & running (on battery)
-//   red    = low battery       off  = charge complete (plugged) / powered down
-//   blink  = BLE searching     solid = BLE connected
-#define LED_BLINK_MS  300    // half-period of the searching / charging flash
-#define LED_DUTY_50   128    // active-low: ~50% duty ≈ 50% brightness (lower = brighter)
+// don't use it. Only one die is ever lit, so colours never blend.
+//   green = charging     blue = on & running (charged/full or on battery)
+//   red   = low battery  (off only when powered down)
+//   blink = BLE searching     solid = BLE connected
+#define LED_BLINK_MS   300   // half-period of the searching / charging flash
+// Active-low PWM: brightness rises as the value falls (~50% ≈ 128, ~75% ≈ 64).
+#define LED_DUTY_BLUE  128   // ~50%
+#define LED_DUTY_GREEN 64    // ~75%
+#define LED_DUTY_RED   128   // ~50% (tune later)
 #define BATT_LOW_MV   3730   // low-battery: matches the app's red threshold (LiPo 20%)
 #define BATT_LOW_CLR  3770   // hysteresis: clear "low" only once back above this
 bool lowBatt = false;
@@ -126,35 +129,36 @@ void sampleBattery() {
   batteryPct = constrain(pct, 0, 100);
 }
 
-// Drive one LED die (active-LOW): lit -> ~50% duty, off -> held HIGH (255).
-static inline void ledDie(uint8_t pin, bool on) {
-  analogWrite(pin, on ? LED_DUTY_50 : 255);
+// Per-colour lit level (active-low: lower = brighter).
+static inline uint8_t ledLit(LedColor c) {
+  switch (c) {
+    case LED_C_GREEN: return LED_DUTY_GREEN;
+    case LED_C_RED:   return LED_DUTY_RED;
+    default:          return LED_DUTY_BLUE;
+  }
 }
 
 // Light exactly one colour (or none) — one die at a time, so nothing blends.
 void setStatusLed(LedColor c, bool on) {
-  ledDie(LED_RED,   on && c == LED_C_RED);
-  ledDie(LED_GREEN, on && c == LED_C_GREEN);
-  ledDie(LED_BLUE,  on && c == LED_C_BLUE);
+  uint8_t v = on ? ledLit(c) : 255;   // 255 = off (held HIGH)
+  analogWrite(LED_RED,   c == LED_C_RED   ? v : 255);
+  analogWrite(LED_GREEN, c == LED_C_GREEN ? v : 255);
+  analogWrite(LED_BLUE,  c == LED_C_BLUE  ? v : 255);
 }
 
-// Status-LED state machine, polled every loop. VBUS-present lets us tell "charge
-// complete (still plugged)" -> off apart from "unplugged" -> on-battery colour.
-// Only touches the pins when the (colour, on) pair actually changes.
+// Status-LED state machine, polled every loop. "Charge complete" isn't
+// distinguished from "on battery" — both are not-charging, so both show blue
+// (on & charged). Only touches the pins when the state actually changes.
 void updateStatusLed() {
   if (batteryMv <= BATT_LOW_MV) lowBatt = true;
   else if (batteryMv >= BATT_LOW_CLR) lowBatt = false;
 
-  bool vbus = (NRF_POWER->USBREGSTATUS & POWER_USBREGSTATUS_VBUSDETECT_Msk) != 0;
+  LedColor color = charging
+                       ? LED_C_GREEN                       // actively charging
+                       : (lowBatt ? LED_C_RED : LED_C_BLUE);  // charged/full or on battery
 
-  LedColor color;
-  if (charging)  color = LED_C_GREEN;                      // actively charging
-  else if (vbus) color = LED_C_OFF;                        // plugged + complete -> off
-  else           color = lowBatt ? LED_C_RED : LED_C_BLUE; // on battery
-
-  bool on = (color == LED_C_OFF) ? false
-            : connected ? true                             // solid when connected
-            : (((millis() / LED_BLINK_MS) & 1) == 0);      // blink when searching
+  bool on = connected ? true                               // solid when connected
+                      : (((millis() / LED_BLINK_MS) & 1) == 0);  // blink when searching
 
   static LedColor lastColor = LED_C_OFF;
   static bool lastOn = false;
