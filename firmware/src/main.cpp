@@ -25,7 +25,7 @@ const uint8_t UART_TX_UUID[16] = {
   0x93, 0xF3, 0xA3, 0xB5, 0x03, 0x00, 0x40, 0x6E};
 // Firmware version string, exposed as a READ characteristic (UUID ...0004...)
 // so the app can show it on connect. Bump on firmware changes (1.0, 1.1, ...).
-#define FW_VERSION "1.3"
+#define FW_VERSION "1.4"
 const uint8_t UART_VER_UUID[16] = {
   0x9E, 0xCA, 0xDC, 0x24, 0x0E, 0xE5, 0xA9, 0xE0,
   0x93, 0xF3, 0xA3, 0xB5, 0x04, 0x00, 0x40, 0x6E};
@@ -73,6 +73,20 @@ uint32_t lastBattUs   = 0;
 bool     charging     = false;   // refreshed from PIN_CHARGE_STATE each loop
 uint32_t lastStatusMs = 0;       // cadence for charging-status packets
 
+// ---- Status LED (onboard user RGB, driven manually; Bluefruit auto-LED off) ----
+// Colour encodes power/charge state; blink encodes BLE. On this board the dies
+// are active-HIGH (variant's LED_STATE_ON == 1); ~50% brightness via PWM. Only
+// one die is ever lit, so colours never blend.
+//   green  = charging          blue = on & running (on battery)
+//   red    = low battery       off  = charge complete (plugged) / powered down
+//   blink  = BLE searching     solid = BLE connected
+#define LED_BLINK_MS  300    // half-period of the searching / charging flash
+#define LED_DUTY_50   128    // ~50% duty ≈ 50% brightness (symmetric either polarity)
+#define BATT_LOW_MV   3730   // low-battery: matches the app's red threshold (LiPo 20%)
+#define BATT_LOW_CLR  3770   // hysteresis: clear "low" only once back above this
+bool lowBatt = false;
+enum LedColor { LED_C_OFF, LED_C_BLUE, LED_C_GREEN, LED_C_RED };
+
 void connectCallback(uint16_t connHandle) {
   BLEConnection* conn = Bluefruit.Connection(connHandle);
   // Everything that maximizes throughput so a high sample rate can stream:
@@ -112,6 +126,46 @@ void sampleBattery() {
   batteryPct = constrain(pct, 0, 100);
 }
 
+// Drive one LED die: on -> ~50% brightness, off -> fully off (active-HIGH here).
+static inline void ledDie(uint8_t pin, bool on) {
+  analogWrite(pin, on ? LED_DUTY_50 : (LED_STATE_ON ? 0 : 255));
+}
+
+// Light exactly one colour (or none) — one die at a time, so nothing blends.
+void setStatusLed(LedColor c, bool on) {
+  ledDie(LED_RED,   on && c == LED_C_RED);
+  ledDie(LED_GREEN, on && c == LED_C_GREEN);
+  ledDie(LED_BLUE,  on && c == LED_C_BLUE);
+}
+
+// Status-LED state machine, polled every loop. VBUS-present lets us tell "charge
+// complete (still plugged)" -> off apart from "unplugged" -> on-battery colour.
+// Only touches the pins when the (colour, on) pair actually changes.
+void updateStatusLed() {
+  if (batteryMv <= BATT_LOW_MV) lowBatt = true;
+  else if (batteryMv >= BATT_LOW_CLR) lowBatt = false;
+
+  bool vbus = (NRF_POWER->USBREGSTATUS & POWER_USBREGSTATUS_VBUSDETECT_Msk) != 0;
+
+  LedColor color;
+  if (charging)  color = LED_C_GREEN;                      // actively charging
+  else if (vbus) color = LED_C_OFF;                        // plugged + complete -> off
+  else           color = lowBatt ? LED_C_RED : LED_C_BLUE; // on battery
+
+  bool on = (color == LED_C_OFF) ? false
+            : connected ? true                             // solid when connected
+            : (((millis() / LED_BLINK_MS) & 1) == 0);      // blink when searching
+
+  static LedColor lastColor = LED_C_OFF;
+  static bool lastOn = false;
+  static bool inited = false;
+  if (inited && color == lastColor && on == lastOn) return;
+  lastColor = color;
+  lastOn = on;
+  inited = true;
+  setStatusLed(color, on);
+}
+
 void setup() {
   Serial.begin(115200);
   uint32_t startWait = millis();
@@ -144,6 +198,8 @@ void setup() {
   // ---- BLE ----
   Bluefruit.configPrphBandwidth(BANDWIDTH_MAX);   // must precede begin()
   Bluefruit.begin();
+  Bluefruit.autoConnLed(false);        // we drive the RGB status LED ourselves
+  setStatusLed(LED_C_OFF, false);      // dark until the first loop() state update
   Bluefruit.setTxPower(4);
   Bluefruit.setName("PaddleTrack");
   Bluefruit.Periph.setConnectCallback(connectCallback);
@@ -187,6 +243,7 @@ void loop() {
 
   // Charge-status line (LOW = charging). Cheap to poll every loop.
   charging = (digitalRead(PIN_CHARGE_STATE) == LOW);
+  updateStatusLed();
 
   if (!connected) {
     delay(1);
