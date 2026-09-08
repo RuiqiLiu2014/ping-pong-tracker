@@ -197,6 +197,10 @@ mixin _BleScreenUi on _BleScreenCore {
     // Connected (so Connect flips to Disconnect) whenever a BLE link is held —
     // streaming, charging, or firmware-too-old-to-stream.
     final connected = streaming || charging || _fwOutdated;
+    // Neutral black/white for button text instead of the theme accent colour.
+    final btnText = Theme.of(context).brightness == Brightness.dark
+        ? Colors.white
+        : Colors.black;
     final m = _motion;
     final String orientationText = m.calibrated
         ? "Roll: ${m.roll.toStringAsFixed(0)}°   Pitch: ${m.pitch.toStringAsFixed(0)}°"
@@ -276,6 +280,7 @@ mixin _BleScreenUi on _BleScreenCore {
           const SizedBox(height: 14),
           OutlinedButton.icon(
             onPressed: (charging || _fwOutdated) ? null : _openCalibration,
+            style: OutlinedButton.styleFrom(foregroundColor: btnText),
             icon: const Icon(Icons.explore),
             label: const Text("Calibrate"),
           ),
@@ -289,27 +294,13 @@ mixin _BleScreenUi on _BleScreenCore {
                 style: TextStyle(fontSize: 12, color: Colors.orange),
               ),
             ),
-          if (streaming)
-            Padding(
-              padding: const EdgeInsets.only(top: 4),
-              child: Builder(
-                builder: (_) {
-                  final d = m.leverDir;
-                  return Text(
-                    "Lever dir (${d[0].toStringAsFixed(2)}, "
-                    "${d[1].toStringAsFixed(2)}, ${d[2].toStringAsFixed(2)})"
-                    "  •  ${m.leverTiltDeg.toStringAsFixed(0)}° off board Z",
-                    style: const TextStyle(fontSize: 12, color: Colors.grey),
-                  );
-                },
-              ),
-            ),
-          const SizedBox(height: 18),
+          const SizedBox(height: 8),
           ElevatedButton(
             onPressed: _isConnecting || connected
                 ? _disconnect
                 : _startScanAndConnect,
             style: ElevatedButton.styleFrom(
+              foregroundColor: btnText,
               padding: const EdgeInsets.symmetric(horizontal: 40, vertical: 15),
             ),
             child: Text(

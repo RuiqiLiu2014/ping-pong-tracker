@@ -119,6 +119,10 @@ class _CalibrationWizardState extends State<CalibrationWizard> {
   @override
   Widget build(BuildContext context) {
     final bool done = _step == _Step.done;
+    // Neutral black/white for the button text instead of the theme accent.
+    final btnText = Theme.of(context).brightness == Brightness.dark
+        ? Colors.white
+        : Colors.black;
     return Scaffold(
       body: SafeArea(
         child: Column(
@@ -207,6 +211,7 @@ class _CalibrationWizardState extends State<CalibrationWizard> {
                           ? null
                           : _onCalibrate,
                       style: ElevatedButton.styleFrom(
+                        foregroundColor: btnText,
                         padding: const EdgeInsets.symmetric(vertical: 16),
                       ),
                       child: Text(
