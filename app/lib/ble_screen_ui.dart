@@ -219,9 +219,7 @@ mixin _BleScreenUi on _BleScreenCore {
           if (_fwOutdated) _firmwareUpdateBanner(),
           const SizedBox(height: 10),
           Text(
-            charging
-                ? "Time to full: $_timeToFull"
-                : "Sample Rate: $_sampleRateStr Hz",
+            "Sample Rate: $_sampleRateStr Hz",
             style: const TextStyle(fontSize: 16, color: Colors.grey),
           ),
           if (streaming || charging) ...[
