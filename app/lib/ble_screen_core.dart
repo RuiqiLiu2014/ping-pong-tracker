@@ -47,12 +47,6 @@ mixin _BleScreenCore
   // Board reports it is charging (fw >= 1.3). While set, the paddle stops
   // streaming IMU data and the % is allowed to rise (the never-rise clamp off).
   bool _charging = false;
-  // Time-to-full estimate (charging only). We fit the SMOOTHED % against time
-  // over a trailing window and extrapolate to 100%, rather than differencing
-  // consecutive samples — that keeps jumpy voltage from wrecking the slope.
-  final List<(double, double)> _chargeSamples = []; // (elapsed s, smoothed %)
-  final Stopwatch _chargeStopwatch = Stopwatch();
-  String _timeToFull = "—";
 
   // Orientation + velocity estimator (sensor fusion), fed every sample.
   final MotionEstimator _motion = MotionEstimator();
@@ -741,16 +735,12 @@ mixin _BleScreenCore
     // never carry N == 0, so the charging bit alone selects this branch.
     if (charging) {
       if (!_charging) {
-        // Entering the charging state: start a fresh time-to-full history.
+        // Entering the charging state.
         _charging = true;
         _connectionStatus = "Charging";
         _sampleRateStr = "0";
-        _resetChargeEstimate();
-        _timeToFull = "estimating…";
-        _chargeStopwatch.start();
       }
       _updateBattery(battPct, charging: true);
-      _recordChargeSample();
       return; // no IMU samples to process while charging
     }
 
@@ -759,7 +749,6 @@ mixin _BleScreenCore
     if (_charging) {
       _charging = false;
       _connectionStatus = "Streaming Data";
-      _resetChargeEstimate();
       _haveChipRef = false;
       _windowStart = null;
       _lastChipTsec = 0;
@@ -931,60 +920,6 @@ mixin _BleScreenCore
     _batteryPct = _batteryShown.toString();
   }
 
-  // Clear the time-to-full history back to idle (stopped clock, no estimate).
-  void _resetChargeEstimate() {
-    _timeToFull = "—";
-    _chargeSamples.clear();
-    _chargeStopwatch
-      ..stop()
-      ..reset();
-  }
-
-  // Record one charging data point (~0.5 Hz) and refresh the time-to-full text.
-  void _recordChargeSample() {
-    final double t = _chargeStopwatch.elapsedMilliseconds / 1000.0;
-    if (_chargeSamples.isNotEmpty && t - _chargeSamples.last.$1 < 2.0) return;
-    _chargeSamples.add((t, _batterySmoothed));
-    final double cutoff = t - 150.0; // keep a ~2.5 min trailing window
-    while (_chargeSamples.length > 2 && _chargeSamples.first.$1 < cutoff) {
-      _chargeSamples.removeAt(0);
-    }
-    _timeToFull = _estimateTimeToFull();
-  }
-
-  // Least-squares slope of % vs time over the window, extrapolated to 100%.
-  // Fitting the smoothed level over minutes makes this robust to voltage noise,
-  // and it bows out gracefully ("estimating…"/"almost full") when the data is
-  // too short or too flat to trust — i.e. warm-up, or the CV taper near the top
-  // where voltage pins at ~4.2 V and any extrapolation is meaningless.
-  String _estimateTimeToFull() {
-    final double pctNow = _batterySmoothed;
-    if (pctNow >= 98) return "almost full";
-    if (_chargeSamples.length < 4) return "estimating…";
-    final double span = _chargeSamples.last.$1 - _chargeSamples.first.$1;
-    if (span < 45) return "estimating…";
-    final int n = _chargeSamples.length;
-    double sx = 0, sy = 0, sxx = 0, sxy = 0;
-    for (final s in _chargeSamples) {
-      sx += s.$1;
-      sy += s.$2;
-      sxx += s.$1 * s.$1;
-      sxy += s.$1 * s.$2;
-    }
-    final double denom = n * sxx - sx * sx;
-    if (denom.abs() < 1e-9) return "estimating…";
-    final double slope = (n * sxy - sx * sy) / denom; // % per second
-    if (slope <= 0.0008) return "estimating…"; // < ~0.05 %/min: too flat to trust
-    final double secs = (100.0 - pctNow) / slope;
-    if (secs < 60) return "< 1 min";
-    if (secs > 12 * 3600) return "estimating…";
-    final int totalMin = (secs / 60).round();
-    if (totalMin < 60) return "~$totalMin min";
-    final int h = totalMin ~/ 60;
-    final int mn = totalMin % 60;
-    return mn == 0 ? "~$h h" : "~$h h $mn min";
-  }
-
   void _resetConnectionUi() {
     _scanTimeoutTimer?.cancel();
     if (!mounted) return;
@@ -999,7 +934,6 @@ mixin _BleScreenCore
       _batterySmoothed = -1; // fresh session -> re-seed the smoother
       _batteryShown = -1;
       _charging = false;
-      _resetChargeEstimate();
       _firmwareVersion = "?";
       _fwOutdated = false;
       _imuData = ["0.00", "0.00", "0.00", "0.00", "0.00", "0.00"];
