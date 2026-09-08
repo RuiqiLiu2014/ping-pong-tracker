@@ -111,6 +111,9 @@ mixin _BleScreenCore
   final List<SavedLog> _logs = [];
   int _logSeq = 0;
   SavedLog? _selectedLog;
+  // Total on-disk size (bytes) of the persisted log files; shown at the bottom
+  // of Settings. Refreshed whenever logs are loaded, added, or deleted.
+  int _logStorageBytes = 0;
   // Logs-list multi-select: when active, rows show checkboxes and the top-right
   // share/delete icons act on the checked set.
   bool _selectMode = false;
@@ -347,6 +350,7 @@ mixin _BleScreenCore
         off += 24;
       }
       await _logFile(dir, log).writeAsBytes(u8, flush: true);
+      _refreshLogStorage();
     } catch (_) {
       // best-effort; a failed persist just means it won't survive restart
     }
@@ -459,6 +463,7 @@ mixin _BleScreenCore
     } catch (_) {
       // no persisted logs / unreadable store
     }
+    _refreshLogStorage();
   }
 
   Future<void> _deleteLogFile(SavedLog log) async {
@@ -467,6 +472,25 @@ mixin _BleScreenCore
       final f = _logFile(dir, log);
       if (await f.exists()) await f.delete();
     } catch (_) {}
+  }
+
+  // Sum the on-disk size of every persisted log file and update the Settings
+  // readout. Best-effort: unreadable entries are skipped.
+  Future<void> _refreshLogStorage() async {
+    int total = 0;
+    try {
+      final dir = await _logsDir();
+      for (final e in dir.listSync()) {
+        if (e is File) {
+          try {
+            total += await e.length();
+          } catch (_) {}
+        }
+      }
+    } catch (_) {}
+    if (mounted && total != _logStorageBytes) {
+      setState(() => _logStorageBytes = total);
+    }
   }
 
   @override
@@ -1256,7 +1280,7 @@ mixin _BleScreenCore
   }
 
   void _deleteLog(SavedLog log) {
-    _deleteLogFile(log);
+    _deleteLogFile(log).then((_) => _refreshLogStorage());
     setState(() {
       _logs.remove(log);
       _speedCache.remove(log.id);
@@ -1336,6 +1360,7 @@ mixin _BleScreenCore
     for (final log in logs) {
       await _deleteLogFile(log);
     }
+    _refreshLogStorage();
     setState(() {
       final ids = logs.map((l) => l.id).toSet();
       _logs.removeWhere((l) => ids.contains(l.id));
