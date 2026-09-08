@@ -95,8 +95,11 @@ mixin _BleScreenCore
   int _dropCount = 0; // total dropped samples this session
   int _capDropStart = 0; // _dropCount snapshot when the current capture began
 
-  // Ring buffer of recent samples (absolute stream time + 6 axes).
+  // Ring buffer of recent samples (absolute stream time + 6 axes). _ringIdx
+  // holds each sample's chip index (relative to session start) so a capture cut
+  // from the ring can count drops inside its window from the index gaps.
   Float64List? _ringT;
+  Float64List? _ringIdx;
   List<Float32List>? _ringAxes;
   int _ringHead = 0; // next write slot
   int _ringLen = 0; // valid samples held
@@ -866,7 +869,7 @@ mixin _BleScreenCore
       if (isHit) _recordHit(tSec);
 
       if (_autoLoggingEnabled) {
-        _processAutoCapture(tSec, isHit, ax, ay, az, gx, gy, gz);
+        _processAutoCapture(tSec, baseIndex + s, isHit, ax, ay, az, gx, gy, gz);
       } else if (_isManualLogging) {
         _appendManualSample(tSec, ax, ay, az, gx, gy, gz);
       }
@@ -1047,6 +1050,7 @@ mixin _BleScreenCore
     _capT ??= Float64List(kMaxLogSamples);
     _capAxes ??= List.generate(6, (_) => Float32List(kMaxLogSamples));
     _ringT ??= Float64List(_kRingCap);
+    _ringIdx ??= Float64List(_kRingCap);
     _ringAxes ??= List.generate(6, (_) => Float32List(_kRingCap));
   }
 
@@ -1070,6 +1074,7 @@ mixin _BleScreenCore
   // packet loop; the 10 Hz UI timer reflects state changes.
   void _processAutoCapture(
     double t,
+    double sampleIdx,
     bool isHit,
     double ax,
     double ay,
@@ -1082,6 +1087,7 @@ mixin _BleScreenCore
 
     // Always push into the ring so the "before-hit" history is fresh.
     _ringT![_ringHead] = t;
+    _ringIdx![_ringHead] = sampleIdx;
     _ringAxes![0][_ringHead] = ax;
     _ringAxes![1][_ringHead] = ay;
     _ringAxes![2][_ringHead] = az;
@@ -1111,6 +1117,7 @@ mixin _BleScreenCore
     final double hi = hitT + _hitWindowSec;
     int idx = (_ringHead - _ringLen + _kRingCap) % _kRingCap; // oldest sample
     int n = 0;
+    double firstSampleIdx = 0, lastSampleIdx = 0; // chip indices of the window
     for (int k = 0; k < _ringLen; k++) {
       final double ts = _ringT![idx];
       if (ts >= lo && ts <= hi && n < kMaxLogSamples) {
@@ -1118,12 +1125,21 @@ mixin _BleScreenCore
         for (int a = 0; a < 6; a++) {
           _capAxes![a][n] = _ringAxes![a][idx];
         }
+        final double sIdx = _ringIdx?[idx] ?? 0;
+        if (n == 0) firstSampleIdx = sIdx;
+        lastSampleIdx = sIdx;
         n++;
       }
       idx = (idx + 1) % _kRingCap;
     }
     _capCount = n;
-    _capDropStart = _dropCount; // ring holds only received samples -> report 0
+    // Drops inside this window = indices that should span it minus samples kept.
+    // The ring only holds received samples, so a lost run leaves an index gap.
+    final int windowDrops = n > 1
+        ? ((lastSampleIdx - firstSampleIdx + 1) - n).round().clamp(0, 1 << 30)
+        : 0;
+    // Feed it through _finalizeCapture's (_dropCount - _capDropStart) formula.
+    _capDropStart = _dropCount - windowDrops;
     _finalizeCapture();
   }
 
