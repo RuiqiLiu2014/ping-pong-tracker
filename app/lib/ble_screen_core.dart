@@ -62,14 +62,13 @@ mixin _BleScreenCore
 
   // ---- Auto-capture (motion-triggered logging) ----
   // Instead of a manual start/stop button, we continuously watch the incoming
-  // stream and auto-record a fixed window around any strong motion (a swing).
-  // Trigger: each detected BALL HIT (from the vibration hit detector) starts a
-  // capture. A ring buffer supplies the "before" history; recording then
-  // continues for the same amount AFTER the hit. So every hit becomes its own
-  // log with `_hitWindowSec` of data on each side (default 1 s).
+  // stream and auto-record a fixed window around every detected BALL HIT. A ring
+  // buffer holds enough history that, once a hit's after-window has streamed in,
+  // we cut [hit - _hitWindowSec, hit + _hitWindowSec] out as its own log. EVERY
+  // hit gets its own log even if nearby windows overlap (duplication by design).
 
   bool _armed = false; // auto-capture enabled (watching for a hit)
-  bool _recording = false; // currently capturing a window around a hit
+  final List<double> _pendingHits = []; // hit times awaiting their after-window
 
   // Manual logging (used when automatic logging is turned off): a Start/Stop
   // button records straight into the capture buffer until stopped or a timeout.
@@ -102,11 +101,11 @@ mixin _BleScreenCore
   int _ringHead = 0; // next write slot
   int _ringLen = 0; // valid samples held
 
-  // In-progress capture; times are absolute stream seconds (rebased on finalize).
+  // Capture scratch buffer; times are absolute stream seconds (rebased on
+  // finalize). Filled live by manual logging, or per-window by an auto extract.
   Float64List? _capT;
   List<Float32List>? _capAxes;
   int _capCount = 0;
-  double _triggerSec = 0; // absolute time the current capture triggered
 
   // Finished logs (newest first) and the one currently open for viewing.
   final List<SavedLog> _logs = [];
@@ -137,7 +136,10 @@ mixin _BleScreenCore
   HoverReadoutPos _hoverPos = HoverReadoutPos.follow; // hover readout side
   bool _timeMicros = false; // show time in µs (else ms with _timeDecimals)
   int _timeDecimals = 3; // ms decimal places (0-3) when not showing µs
-  double _hitWindowSec = 1.0; // data captured before AND after each hit (s)
+  // Data captured before AND after each hit (s). Default 0.9 s: just under the
+  // ~1.1 s between a single player's own hits in a rally, so a log typically
+  // holds one hit. User-adjustable in Settings (0.25–2.0 s).
+  double _hitWindowSec = 0.9;
   double _manualTimeoutSec = 4.0; // manual logging auto-stop (0.1 - 5.0 s)
   double _hitThreshG = 0.5; // ball-hit vibration threshold (lower = sensitive)
   double _swingHpSec = 0.35; // swing-speed high-pass window (0.2 - 0.7 s)
@@ -879,7 +881,8 @@ mixin _BleScreenCore
   // Save any in-progress capture (auto window or manual session) before teardown.
   void _finalizeInFlight() {
     _autoStopTimer?.cancel();
-    if (_recording || _isManualLogging) {
+    _flushPendingHits(); // cut logs for any auto hits captured so far
+    if (_isManualLogging) {
       _isManualLogging = false;
       _finalizeCapture();
     }
@@ -958,7 +961,7 @@ mixin _BleScreenCore
       _calReminderDue = false;
       _imuData = ["0.00", "0.00", "0.00", "0.00", "0.00", "0.00"];
       _armed = false;
-      _recording = false;
+      _pendingHits.clear();
       _isManualLogging = false;
       _streamStopwatch
         ..stop()
@@ -1027,7 +1030,7 @@ mixin _BleScreenCore
   void _toggleArmed() {
     setState(() {
       if (_armed) {
-        if (_recording) _finalizeCapture(); // flush any in-flight window
+        _flushPendingHits(); // cut logs for any hits still pending
         _armed = false;
       } else {
         _ensureCaptureBuffers();
@@ -1064,49 +1067,47 @@ mixin _BleScreenCore
     _ringHead = (_ringHead + 1) % _kRingCap;
     if (_ringLen < _kRingCap) _ringLen++;
 
-    if (_recording) {
-      if (_capCount < kMaxLogSamples) {
-        _capT![_capCount] = t;
-        _capAxes![0][_capCount] = ax;
-        _capAxes![1][_capCount] = ay;
-        _capAxes![2][_capCount] = az;
-        _capAxes![3][_capCount] = gx;
-        _capAxes![4][_capCount] = gy;
-        _capAxes![5][_capCount] = gz;
-        _capCount++;
-      }
-      // Stop once we've recorded the "after" window past the hit (further hits
-      // inside the window stay in this log and are marked, not split out).
-      final bool done = (t - _triggerSec) >= _hitWindowSec;
-      final bool full = _capCount >= kMaxLogSamples;
-      if (done || full) {
-        _finalizeCapture();
-        // A new log just landed. Refresh explicitly so it appears even when the
-        // repaint timer is paused (e.g. watching captures roll in on the Logs
-        // tab); on the Connection tab the timer would catch it anyway.
-        if (mounted) setState(() {});
-      }
-    } else if (_armed && isHit) {
-      _startHitCapture(t); // a hit → new log centered on it
+    if (_armed && isHit) _pendingHits.add(t);
+
+    // Once a hit's after-window has fully streamed in, cut it its own log. Nearby
+    // hits' windows overlap and each still gets a log (that duplication is fine).
+    while (_pendingHits.isNotEmpty && (t - _pendingHits.first) >= _hitWindowSec) {
+      _extractHitLog(_pendingHits.removeAt(0));
+      // A new log just landed; refresh so it appears even if the repaint timer is
+      // paused (e.g. watching captures roll in on the Logs tab).
+      if (mounted) setState(() {});
     }
   }
 
-  // Begin a capture on a hit: copy the most recent `_hitWindowSec` of history
-  // from the ring (which already includes the hit sample) as the "before" part.
-  void _startHitCapture(double hitT) {
-    final int pre = math.min(_ringLen, (_hitWindowSec * _odrHz).round());
-    int idx = (_ringHead - pre + _kRingCap) % _kRingCap;
-    for (int j = 0; j < pre; j++) {
-      _capT![j] = _ringT![idx];
-      for (int a = 0; a < 6; a++) {
-        _capAxes![a][j] = _ringAxes![a][idx];
+  // Cut one hit's window [hit ± _hitWindowSec] out of the ring into its own log.
+  // Collects whatever samples exist in that span (partial at session start or on
+  // teardown) and hands them to _finalizeCapture, which rebases + persists.
+  void _extractHitLog(double hitT) {
+    final double lo = hitT - _hitWindowSec;
+    final double hi = hitT + _hitWindowSec;
+    int idx = (_ringHead - _ringLen + _kRingCap) % _kRingCap; // oldest sample
+    int n = 0;
+    for (int k = 0; k < _ringLen; k++) {
+      final double ts = _ringT![idx];
+      if (ts >= lo && ts <= hi && n < kMaxLogSamples) {
+        _capT![n] = ts;
+        for (int a = 0; a < 6; a++) {
+          _capAxes![a][n] = _ringAxes![a][idx];
+        }
+        n++;
       }
       idx = (idx + 1) % _kRingCap;
     }
-    _capCount = pre;
-    _triggerSec = hitT;
-    _capDropStart = _dropCount;
-    _recording = true;
+    _capCount = n;
+    _capDropStart = _dropCount; // ring holds only received samples -> report 0
+    _finalizeCapture();
+  }
+
+  // Cut logs for every hit still awaiting its window (on disarm / disconnect).
+  void _flushPendingHits() {
+    while (_pendingHits.isNotEmpty) {
+      _extractHitLog(_pendingHits.removeAt(0));
+    }
   }
 
   // Record a detected ball-hit (absolute stream time); keep a bounded history
@@ -1122,7 +1123,6 @@ mixin _BleScreenCore
   // Snapshot the captured window into a right-sized SavedLog (times rebased so
   // the log starts at t = 0), keeping it armed for the next swing.
   void _finalizeCapture() {
-    _recording = false;
     if (_capCount > 1) {
       final int n = _capCount;
       final double t0 = _capT![0];
@@ -1176,7 +1176,7 @@ mixin _BleScreenCore
         _isManualLogging = false;
         _finalizeCapture();
       }
-      if (_recording) _finalizeCapture();
+      _flushPendingHits();
       _armed = false;
       _autoLoggingEnabled = enabled;
     });
