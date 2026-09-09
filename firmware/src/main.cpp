@@ -70,20 +70,21 @@ volatile bool connected = false;
 int      batteryPct   = 100;
 uint16_t batteryMv    = 0;       // raw cell millivolts (fw >= 1.3 packet field)
 uint32_t lastBattUs   = 0;
-bool     charging     = false;   // refreshed from PIN_CHARGE_STATE each loop
+bool     pluggedIn    = false;   // VBUS present (USB 5 V) — gates streaming + LED
+bool     chargeActive = false;   // CHG pin LOW = charger actively pushing current
 uint32_t lastStatusMs = 0;       // cadence for charging-status packets
 
 // ---- Status LED (onboard user RGB, driven manually; Bluefruit auto-LED off) ----
-// Colour encodes power/charge state; blink encodes BLE. On this board the dies
-// are active-LOW (pin LOW = lit) — the variant's LED_STATE_ON is wrong, so we
-// don't use it. Only one die is ever lit, so colours never blend.
-//   green = charging     blue = on & running (charged/full or on battery)
-//   red   = low battery  (off only when powered down)
-//   blink = BLE searching     solid = BLE connected
+// Colour encodes power state; blink encodes activity. On this board the dies are
+// active-LOW (pin LOW = lit) — the variant's LED_STATE_ON is wrong, so we don't
+// use it. Only one die is ever lit, so colours never blend.
+//   Plugged in: green — blink while charging, solid once full / charge-complete.
+//   On battery: blue (ok) or red (low) — blink while BLE-searching, solid when
+//               BLE-connected.  (off only when powered down)
 #define LED_BLINK_MS   300   // half-period of the searching / charging flash
 // Active-low PWM: brightness rises as the value falls (~50% ≈ 128, ~75% ≈ 64).
 #define LED_DUTY_BLUE  128   // ~50%
-#define LED_DUTY_GREEN 64    // ~75%
+#define LED_DUTY_GREEN 0     // 100% (max brightness)
 #define LED_DUTY_RED   128   // ~50% (tune later)
 #define BATT_LOW_MV   3730   // low-battery: matches the app's red threshold (LiPo 20%)
 #define BATT_LOW_CLR  3770   // hysteresis: clear "low" only once back above this
@@ -146,19 +147,23 @@ void setStatusLed(LedColor c, bool on) {
   analogWrite(LED_BLUE,  c == LED_C_BLUE  ? v : 255);
 }
 
-// Status-LED state machine, polled every loop. "Charge complete" isn't
-// distinguished from "on battery" — both are not-charging, so both show blue
-// (on & charged). Only touches the pins when the state actually changes.
+// Status-LED state machine, polled every loop. Plugged in => green (blink while
+// charging, solid once full). On battery => blue/red for ok/low, blinking while
+// searching for BLE and solid once connected. Only touches the pins on change.
 void updateStatusLed() {
   if (batteryMv <= BATT_LOW_MV) lowBatt = true;
   else if (batteryMv >= BATT_LOW_CLR) lowBatt = false;
 
-  LedColor color = charging
-                       ? LED_C_GREEN                       // actively charging
-                       : (lowBatt ? LED_C_RED : LED_C_BLUE);  // charged/full or on battery
-
-  bool on = connected ? true                               // solid when connected
-                      : (((millis() / LED_BLINK_MS) & 1) == 0);  // blink when searching
+  const bool blink = ((millis() / LED_BLINK_MS) & 1) == 0;
+  LedColor color;
+  bool on;
+  if (pluggedIn) {
+    color = LED_C_GREEN;
+    on = chargeActive ? blink : true;   // blink while charging, solid when full
+  } else {
+    color = lowBatt ? LED_C_RED : LED_C_BLUE;
+    on = connected ? true : blink;      // solid when connected, blink when searching
+  }
 
   static LedColor lastColor = LED_C_OFF;
   static bool lastOn = false;
@@ -245,8 +250,15 @@ void loop() {
     lastBattUs = nowUs;
   }
 
-  // Charge-status line (LOW = charging). Cheap to poll every loop.
-  charging = (digitalRead(PIN_CHARGE_STATE) == LOW);
+  // "Plugged in" = USB 5 V present on VBUS, independent of whether the charger
+  // is still pushing current or has already topped off (the CHG pin goes HIGH at
+  // charge-complete even while still plugged). We gate on VBUS so a full-but-
+  // plugged board is still treated as charging: it never streams while plugged,
+  // which frees the charge current AND — critically — avoids the streaming load
+  // sagging VBAT. That sag used to get latched by the app's never-rise clamp and
+  // crater the reported %. CHG pin is left wired but no longer gates streaming.
+  pluggedIn = (NRF_POWER->USBREGSTATUS & POWER_USBREGSTATUS_VBUSDETECT_Msk) != 0;
+  chargeActive = (digitalRead(PIN_CHARGE_STATE) == LOW);  // charger pushing current
   updateStatusLed();
 
   if (!connected) {
@@ -254,14 +266,14 @@ void loop() {
     return;
   }
 
-  // ---- Charging: do NOT stream IMU. Send a small header-only status packet
-  // ~2 Hz (N = 0, battery byte bit 7 set) so the app shows a dedicated charging
-  // state and a live battery %. Not streaming also frees the ~50 mA charge
-  // current to actually fill the cell instead of running the sensor+radio. ----
-  if (charging) {
+  // ---- Plugged in: do NOT stream IMU. Send a small header-only status packet
+  // ~1 Hz (N = 0, battery byte bit 7 set) so the app shows a dedicated charging
+  // state and a live battery %. Not streaming frees the ~50 mA charge current AND
+  // keeps VBAT off-load so the reported % stays true (no sag to latch). ----
+  if (pluggedIn) {
     sampleCount = 0;                        // drop any half-filled stream batch
     uint32_t nowMs = millis();
-    if (nowMs - lastStatusMs >= 1000) {     // ~1 Hz status while charging (low rate)
+    if (nowMs - lastStatusMs >= 1000) {     // ~1 Hz status while plugged (low rate)
       memset(txbuf, 0, PKT_HEADER);
       txbuf[8] = (uint8_t)(batteryPct | 0x80);  // bit7 = charging
       txbuf[9] = 0;                             // N = 0 (no samples)
