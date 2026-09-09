@@ -3,7 +3,7 @@
   Section order is recruiter-first: hook + demo at the very top, build/hardware
   details lower down. Keep the top third skimmable in ~30 seconds.
 -->
-
+CURRENTLY IN PROGRESS
 # [ Project title goes here ]
 
 > [ One-sentence hook goes here — what it is + why it's impressive, in plain English. ]
