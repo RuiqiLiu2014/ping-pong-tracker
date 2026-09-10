@@ -1131,7 +1131,7 @@ mixin _BleScreenUi on _BleScreenCore {
                   style: const TextStyle(fontWeight: FontWeight.bold),
                 ),
               ),
-              if (info != null) _infoIcon(title, info),
+              if (info != null) _infoIcon(info),
             ],
           ),
         ),
@@ -1165,31 +1165,96 @@ mixin _BleScreenUi on _BleScreenCore {
     );
   }
 
-  // Small "ⓘ" next to a graph title; tapping pops up a one-line description.
-  Widget _infoIcon(String title, String info) {
-    return IconButton(
-      icon: const Icon(Icons.info_outline, size: 16),
-      iconSize: 16,
-      visualDensity: VisualDensity.compact,
-      padding: const EdgeInsets.only(left: 6),
-      constraints: const BoxConstraints(),
-      splashRadius: 16,
-      tooltip: info,
-      color: Colors.grey,
-      onPressed: () => showDialog<void>(
-        context: context,
-        builder: (ctx) => AlertDialog(
-          title: Text(title),
-          content: Text(info),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.pop(ctx),
-              child: const Text("Got it"),
-            ),
-          ],
+  // Small "ⓘ" next to a graph title. Tapping shows a non-modal speech bubble to
+  // the right of the icon (triangle pointing back at it), styled like the graph
+  // hover readout; tapping anywhere else dismisses it.
+  Widget _infoIcon(String info) {
+    return Builder(
+      builder: (iconCtx) => GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onTap: () => _toggleInfoBubble(iconCtx, info),
+        child: const Padding(
+          padding: EdgeInsets.only(left: 6),
+          child: Icon(Icons.info_outline, size: 16, color: Colors.grey),
         ),
       ),
     );
+  }
+
+  void _toggleInfoBubble(BuildContext iconCtx, String info) {
+    // Re-tapping the icon that opened the bubble closes it.
+    final bool sameOwner = identical(_infoBubbleOwner, iconCtx);
+    _removeInfoBubble();
+    if (sameOwner) return;
+
+    final box = iconCtx.findRenderObject() as RenderBox?;
+    final overlayState = Overlay.of(iconCtx);
+    final overlayBox = overlayState.context.findRenderObject() as RenderBox?;
+    if (box == null || overlayBox == null || !box.attached) return;
+    // Right-centre of the icon, in the overlay's coordinate space.
+    final Offset anchor = box.localToGlobal(
+      box.size.centerRight(Offset.zero),
+      ancestor: overlayBox,
+    );
+    final Size overlaySize = overlayBox.size;
+    final bool dark = Theme.of(iconCtx).brightness == Brightness.dark;
+    final Color bg = dark ? const Color(0xF21E1E1E) : const Color(0xF2FFFFFF);
+    final Color border = dark ? Colors.white24 : Colors.black26;
+    final Color ink = dark ? Colors.white : Colors.black87;
+    final double maxW = (overlaySize.width - anchor.dx - 24).clamp(120.0, 280.0);
+
+    _infoBubbleOwner = iconCtx;
+    _infoBubble = OverlayEntry(
+      builder: (_) => Stack(
+        children: [
+          // Transparent full-screen dismiss layer (no tint -> non-blocking look).
+          Positioned.fill(
+            child: GestureDetector(
+              behavior: HitTestBehavior.opaque,
+              onTap: _removeInfoBubble,
+            ),
+          ),
+          Positioned(
+            left: anchor.dx + 2,
+            top: anchor.dy,
+            child: FractionalTranslation(
+              translation: const Offset(0, -0.5), // centre the bubble on the icon
+              child: Material(
+                color: Colors.transparent,
+                child: Row(
+                  crossAxisAlignment: CrossAxisAlignment.center,
+                  children: [
+                    CustomPaint(
+                      size: const Size(7, 13),
+                      painter: _BubbleArrowPainter(bg, border),
+                    ),
+                    Transform.translate(
+                      offset: const Offset(-1, 0), // tuck under the arrow base
+                      child: ConstrainedBox(
+                        constraints: BoxConstraints(maxWidth: maxW),
+                        child: Container(
+                          padding: const EdgeInsets.fromLTRB(10, 7, 10, 7),
+                          decoration: BoxDecoration(
+                            color: bg,
+                            borderRadius: BorderRadius.circular(6),
+                            border: Border.all(color: border),
+                          ),
+                          child: Text(
+                            info,
+                            style: TextStyle(fontSize: 12, color: ink),
+                          ),
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+    overlayState.insert(_infoBubble!);
   }
 
   Widget _legend(List<Color> colors, List<String> labels) {
@@ -1717,4 +1782,43 @@ mixin _BleScreenUi on _BleScreenCore {
       ],
     );
   }
+}
+
+// Left-pointing triangle for the graph-info speech bubble: filled to match the
+// bubble, with only the two slanted edges stroked (the base meets the bubble).
+class _BubbleArrowPainter extends CustomPainter {
+  final Color fill;
+  final Color border;
+  _BubbleArrowPainter(this.fill, this.border);
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final tip = Offset(0, size.height / 2);
+    final top = Offset(size.width, 0);
+    final bot = Offset(size.width, size.height);
+    canvas.drawPath(
+      Path()
+        ..moveTo(top.dx, top.dy)
+        ..lineTo(tip.dx, tip.dy)
+        ..lineTo(bot.dx, bot.dy)
+        ..close(),
+      Paint()
+        ..color = fill
+        ..style = PaintingStyle.fill,
+    );
+    canvas.drawPath(
+      Path()
+        ..moveTo(top.dx, top.dy)
+        ..lineTo(tip.dx, tip.dy)
+        ..lineTo(bot.dx, bot.dy),
+      Paint()
+        ..color = border
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 1,
+    );
+  }
+
+  @override
+  bool shouldRepaint(covariant _BubbleArrowPainter old) =>
+      old.fill != fill || old.border != border;
 }
