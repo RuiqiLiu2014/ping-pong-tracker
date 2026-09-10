@@ -62,6 +62,9 @@ class MotionEstimator {
   final List<double> _faceVelBody = [0, 0, 0];
   final List<double> _faceVelWorld = [0, 0, 0];
   List<double> get faceVelWorld => _faceVelWorld;
+  // World "up" expressed in the body frame (unit), refreshed each update(). Lets
+  // callers read the paddle's tilt relative to gravity without tracking yaw.
+  final List<double> _upBody = [0, 0, 1];
   int _restCount = 0;
 
   // Calibration accumulators
@@ -96,6 +99,19 @@ class MotionEstimator {
   bool get hasFaceNormal => _faceNormal != null;
   List<double>? get faceNormal =>
       _faceNormal == null ? null : List<double>.of(_faceNormal!);
+
+  /// Signed elevation of the paddle-face normal above horizontal, in degrees:
+  /// +90 = face pointing straight up (open, e.g. a defensive push from below),
+  /// 0 = face vertical (a drive), -90 = face pointing down (closed). Null until a
+  /// face normal is available. Uses only gravity, so it's drift-free and
+  /// yaw-independent — the same board-frame trick as the closing/brushing split.
+  double? get faceElevationDeg {
+    final n = _faceNormal;
+    if (n == null) return null;
+    final double d = (_upBody[0] * n[0] + _upBody[1] * n[1] + _upBody[2] * n[2])
+        .clamp(-1.0, 1.0);
+    return math.asin(d) * _rad2deg;
+  }
 
   /// True when the flat ("forehand face up") pose looks right. The board is
   /// mounted flat against the paddle base with its +Z along the handle, so in
@@ -289,6 +305,9 @@ class MotionEstimator {
     final double ux = 2 * (_q1 * _q3 - _q0 * _q2);
     final double uy = 2 * (_q0 * _q1 + _q2 * _q3);
     final double uz = _q0 * _q0 - _q1 * _q1 - _q2 * _q2 + _q3 * _q3;
+    _upBody[0] = ux;
+    _upBody[1] = uy;
+    _upBody[2] = uz;
     roll = math.atan2(uy, uz) * _rad2deg;
     pitch = math.atan2(-ux, math.sqrt(uy * uy + uz * uz)) * _rad2deg;
     tilt = math.acos(uz.clamp(-1.0, 1.0)) * _rad2deg;
@@ -417,6 +436,11 @@ class SpeedSeries {
   final double maxFacePerp;
   final Float32List facePar; // brushing (parallel to face), m/s
   final double maxFacePar;
+  // Signed elevation of the paddle face vs vertical, in degrees (+ = open/up,
+  // - = closed/down). Only meaningful when hasComponents. min/max span the swing.
+  final Float32List faceAngle;
+  final double faceAngleMin;
+  final double faceAngleMax;
   final bool hasComponents; // whether a face normal was supplied to split
   const SpeedSeries(
     this.speed,
@@ -431,6 +455,9 @@ class SpeedSeries {
     this.maxFacePerp,
     this.facePar,
     this.maxFacePar,
+    this.faceAngle,
+    this.faceAngleMin,
+    this.faceAngleMax,
     this.hasComponents,
   );
 }
@@ -454,6 +481,7 @@ SpeedSeries computeSpeedSeries(
   final faceSpeed = Float32List(count);
   final facePerp = Float32List(count);
   final facePar = Float32List(count);
+  final faceAngle = Float32List(count);
   final bool hasComp = faceNormal != null && faceNormal.length >= 3;
   if (count == 0 || axes.length < 6) {
     return SpeedSeries(
@@ -468,6 +496,9 @@ SpeedSeries computeSpeedSeries(
       facePerp,
       0,
       facePar,
+      0,
+      faceAngle,
+      0,
       0,
       hasComp,
     );
@@ -514,6 +545,8 @@ SpeedSeries computeSpeedSeries(
   final fvz = Float64List(count);
 
   double maxS = 0, maxF = 0, maxP = 0, maxA = 0;
+  double angMin = 0, angMax = 0;
+  bool angSeen = false;
   for (int i = 0; i < count; i++) {
     m.update(
       axes[0][i],
@@ -523,6 +556,13 @@ SpeedSeries computeSpeedSeries(
       axes[4][i],
       axes[5][i],
     );
+    if (hasComp) {
+      final double a = m.faceElevationDeg ?? 0;
+      faceAngle[i] = a;
+      if (!angSeen || a < angMin) angMin = a;
+      if (!angSeen || a > angMax) angMax = a;
+      angSeen = true;
+    }
     speed[i] = m.speed;
     final la = m.linAccWorld;
     lax[i] = la[0];
@@ -596,6 +636,9 @@ SpeedSeries computeSpeedSeries(
     maxP,
     facePar,
     maxA,
+    faceAngle,
+    angMin,
+    angMax,
     hasComp,
   );
 }

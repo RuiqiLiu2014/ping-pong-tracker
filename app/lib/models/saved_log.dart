@@ -15,6 +15,10 @@ class SavedLog {
   // captured. Kept per-log so the ⟂/∥ split is stable — recalibrating later
   // doesn't rewrite old logs. Null for logs recorded before this was stored.
   final List<double>? faceNormal;
+  // Sensor->tip lever direction (board frame) from the calibration active at
+  // capture. Frozen alongside faceNormal so ω×r face/swing speed also stays
+  // stable across later recalibration. Null for logs recorded before this.
+  final List<double>? leverDir;
 
   SavedLog(
     this.id,
@@ -27,6 +31,7 @@ class SavedLog {
     this.hitTimes = const [],
     this.droppedSamples = 0,
     this.faceNormal,
+    this.leverDir,
   });
 
   String get displayName => name.isEmpty ? "Log #$id" : name;
