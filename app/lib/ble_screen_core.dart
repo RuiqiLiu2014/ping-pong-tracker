@@ -299,8 +299,9 @@ mixin _BleScreenCore
     try {
       final dir = await _logsDir();
       final n = log.count;
-      // Name and hit-times are appended at the end so older files without them
-      // still load, and a rename only rewrites this small file.
+      // Fixed layout: count, times, 6 axes, then name, hit-times, dropped count,
+      // face normal, and lever direction. Face normal / lever dir write a count
+      // of 3 (present) or 0 (no calibration when captured).
       final nameBytes = utf8.encode(log.name);
       final hits = log.hitTimes;
       final fn = log.faceNormal;
@@ -346,13 +347,9 @@ mixin _BleScreenCore
         bd.setFloat64(off, h, Endian.little);
         off += 8;
       }
-      bd.setInt32(
-        off,
-        log.droppedSamples,
-        Endian.little,
-      ); // trailing, back-compat
+      bd.setInt32(off, log.droppedSamples, Endian.little);
       off += 4;
-      // Trailing face normal (count 3 + 3 doubles), back-compat.
+      // Face normal: count 3 + 3 doubles, or count 0 when uncalibrated.
       bd.setInt32(off, hasFn ? 3 : 0, Endian.little);
       off += 4;
       if (hasFn) {
@@ -361,7 +358,7 @@ mixin _BleScreenCore
         bd.setFloat64(off + 16, fn[2], Endian.little);
         off += 24;
       }
-      // Trailing lever direction (count 3 + 3 doubles), back-compat.
+      // Lever direction: count 3 + 3 doubles, or count 0 when uncalibrated.
       bd.setInt32(off, hasLd ? 3 : 0, Endian.little);
       off += 4;
       if (hasLd) {
@@ -408,61 +405,48 @@ mixin _BleScreenCore
           }
           return col;
         });
-        // Optional trailing name (absent in older files).
+        // Name.
         String name = "";
-        if (bytes.length >= off + 4) {
-          final nameLen = bd.getInt32(off, Endian.little);
-          off += 4;
-          if (nameLen > 0 && bytes.length >= off + nameLen) {
-            name = utf8.decode(bytes.sublist(off, off + nameLen));
-            off += nameLen;
-          }
+        final nameLen = bd.getInt32(off, Endian.little);
+        off += 4;
+        if (nameLen > 0) {
+          name = utf8.decode(bytes.sublist(off, off + nameLen));
+          off += nameLen;
         }
-        // Optional trailing hit times (absent in older files).
+        // Hit times.
         final hitTimes = <double>[];
-        if (bytes.length >= off + 4) {
-          final hitCount = bd.getInt32(off, Endian.little);
-          off += 4;
-          if (hitCount > 0 && bytes.length >= off + hitCount * 8) {
-            for (int i = 0; i < hitCount; i++) {
-              hitTimes.add(bd.getFloat64(off, Endian.little));
-              off += 8;
-            }
-          }
+        final hitCount = bd.getInt32(off, Endian.little);
+        off += 4;
+        for (int i = 0; i < hitCount; i++) {
+          hitTimes.add(bd.getFloat64(off, Endian.little));
+          off += 8;
         }
-        // Optional trailing dropped-sample count (absent in older files).
-        int dropped = 0;
-        if (bytes.length >= off + 4) {
-          dropped = bd.getInt32(off, Endian.little);
-          off += 4;
-        }
-        // Optional trailing face normal (absent in older files).
+        // Dropped-sample count.
+        final dropped = bd.getInt32(off, Endian.little);
+        off += 4;
+        // Face normal (count 3 when a face-up calibration was active, else 0).
         List<double>? faceNormal;
-        if (bytes.length >= off + 4) {
-          final fnCount = bd.getInt32(off, Endian.little);
-          off += 4;
-          if (fnCount == 3 && bytes.length >= off + 24) {
-            faceNormal = [
-              bd.getFloat64(off, Endian.little),
-              bd.getFloat64(off + 8, Endian.little),
-              bd.getFloat64(off + 16, Endian.little),
-            ];
-            off += 24;
-          }
+        final fnCount = bd.getInt32(off, Endian.little);
+        off += 4;
+        if (fnCount == 3) {
+          faceNormal = [
+            bd.getFloat64(off, Endian.little),
+            bd.getFloat64(off + 8, Endian.little),
+            bd.getFloat64(off + 16, Endian.little),
+          ];
+          off += 24;
         }
-        // Optional trailing lever direction (absent in older files).
+        // Lever direction (count 3 when a lever calibration was active, else 0).
         List<double>? leverDir;
-        if (bytes.length >= off + 4) {
-          final ldCount = bd.getInt32(off, Endian.little);
-          off += 4;
-          if (ldCount == 3 && bytes.length >= off + 24) {
-            leverDir = [
-              bd.getFloat64(off, Endian.little),
-              bd.getFloat64(off + 8, Endian.little),
-              bd.getFloat64(off + 16, Endian.little),
-            ];
-            off += 24;
-          }
+        final ldCount = bd.getInt32(off, Endian.little);
+        off += 4;
+        if (ldCount == 3) {
+          leverDir = [
+            bd.getFloat64(off, Endian.little),
+            bd.getFloat64(off + 8, Endian.little),
+            bd.getFloat64(off + 16, Endian.little),
+          ];
+          off += 24;
         }
         loaded.add(
           SavedLog(
