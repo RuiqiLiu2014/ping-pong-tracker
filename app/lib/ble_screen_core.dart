@@ -117,6 +117,11 @@ mixin _BleScreenCore
   // Total on-disk size (bytes) of the persisted log files; shown at the bottom
   // of Settings. Refreshed whenever logs are loaded, added, or deleted.
   int _logStorageBytes = 0;
+  // Non-modal graph-info speech bubble (built in the UI mixin): a lightweight
+  // overlay anchored to the tapped ⓘ, dismissed by tapping anywhere.
+  // _infoBubbleOwner tracks which icon opened it so re-tapping toggles it shut.
+  OverlayEntry? _infoBubble;
+  BuildContext? _infoBubbleOwner;
   // Logs-list multi-select: when active, rows show checkboxes and the top-right
   // share/delete icons act on the checked set.
   bool _selectMode = false;
@@ -505,6 +510,13 @@ mixin _BleScreenCore
     } catch (_) {}
   }
 
+  // Dismiss the graph-info speech bubble overlay, if one is open.
+  void _removeInfoBubble() {
+    _infoBubble?.remove();
+    _infoBubble = null;
+    _infoBubbleOwner = null;
+  }
+
   // Sum the on-disk size of every persisted log file and update the Settings
   // readout. Best-effort: unreadable entries are skipped.
   Future<void> _refreshLogStorage() async {
@@ -526,6 +538,7 @@ mixin _BleScreenCore
 
   @override
   void dispose() {
+    _removeInfoBubble(); // drop any open graph-info popover
     _uiTimer?.cancel();
     _autoStopTimer?.cancel();
     _manualProgressTimer?.cancel();
