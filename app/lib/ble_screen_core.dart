@@ -300,6 +300,8 @@ mixin _BleScreenCore
       final hits = log.hitTimes;
       final fn = log.faceNormal;
       final bool hasFn = fn != null && fn.length >= 3;
+      final ld = log.leverDir;
+      final bool hasLd = ld != null && ld.length >= 3;
       final bd = ByteData(
         4 +
             n * 8 +
@@ -310,7 +312,9 @@ mixin _BleScreenCore
             hits.length * 8 +
             4 + // dropped-sample count
             4 + // face-normal presence/count
-            (hasFn ? 24 : 0), // 3 x float64
+            (hasFn ? 24 : 0) + // 3 x float64
+            4 + // lever-dir presence/count
+            (hasLd ? 24 : 0), // 3 x float64
       );
       int off = 0;
       bd.setInt32(off, n, Endian.little);
@@ -350,6 +354,15 @@ mixin _BleScreenCore
         bd.setFloat64(off, fn[0], Endian.little);
         bd.setFloat64(off + 8, fn[1], Endian.little);
         bd.setFloat64(off + 16, fn[2], Endian.little);
+        off += 24;
+      }
+      // Trailing lever direction (count 3 + 3 doubles), back-compat.
+      bd.setInt32(off, hasLd ? 3 : 0, Endian.little);
+      off += 4;
+      if (hasLd) {
+        bd.setFloat64(off, ld[0], Endian.little);
+        bd.setFloat64(off + 8, ld[1], Endian.little);
+        bd.setFloat64(off + 16, ld[2], Endian.little);
         off += 24;
       }
       await _logFile(dir, log).writeAsBytes(u8, flush: true);
@@ -432,6 +445,20 @@ mixin _BleScreenCore
             off += 24;
           }
         }
+        // Optional trailing lever direction (absent in older files).
+        List<double>? leverDir;
+        if (bytes.length >= off + 4) {
+          final ldCount = bd.getInt32(off, Endian.little);
+          off += 4;
+          if (ldCount == 3 && bytes.length >= off + 24) {
+            leverDir = [
+              bd.getFloat64(off, Endian.little),
+              bd.getFloat64(off + 8, Endian.little),
+              bd.getFloat64(off + 16, Endian.little),
+            ];
+            off += 24;
+          }
+        }
         loaded.add(
           SavedLog(
             id,
@@ -444,6 +471,7 @@ mixin _BleScreenCore
             hitTimes: hitTimes,
             droppedSamples: dropped,
             faceNormal: faceNormal,
+            leverDir: leverDir,
           ),
         );
         if (id > maxId) maxId = id;
@@ -1192,6 +1220,8 @@ mixin _BleScreenCore
         droppedSamples: dropped,
         // Freeze the mounting normal so this log's ⟂/∥ split never shifts.
         faceNormal: _faceNormal == null ? null : List<double>.of(_faceNormal!),
+        // Freeze the lever direction too, so ω×r face/swing speed stays stable.
+        leverDir: _leverDir == null ? null : List<double>.of(_leverDir!),
       );
       _logs.insert(0, created);
       _prefs?.setInt(_kLogSeqKey, _logSeq); // remember the last issued number

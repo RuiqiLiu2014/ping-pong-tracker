@@ -757,10 +757,10 @@ mixin _BleScreenUi on _BleScreenCore {
         log.axes,
         log.count,
         swingHpSec: _swingHpSec,
-        // The log's own captured normal keeps its split stable; older logs
-        // without one fall back to the current calibration.
+        // The log's own captured calibration keeps its speeds/split stable;
+        // older logs without one fall back to the current calibration.
         faceNormal: log.faceNormal ?? _faceNormal,
-        leverDir: _leverDir,
+        leverDir: log.leverDir ?? _leverDir,
       ),
     );
     // Fixed back/title/actions bar, then one lazy list holding the charts
@@ -906,10 +906,11 @@ mixin _BleScreenUi on _BleScreenCore {
           cornerText: "max ${ss.maxTrueFaceSpeed.toStringAsFixed(1)} m/s",
           unit: "m/s",
           decimals: 2,
+          info: "Speed of the paddle face.",
         ),
         // 2. Swing speed (translation only, drift-corrected accel).
         _chartSection(
-          "Swing speed (drift-corrected)",
+          "Swing speed",
           log,
           [ss.swingSpeed],
           const [Colors.blue],
@@ -919,12 +920,13 @@ mixin _BleScreenUi on _BleScreenCore {
           cornerText: "max ${ss.maxSwingSpeed.toStringAsFixed(1)} m/s",
           unit: "m/s",
           decimals: 2,
+          info: "Speed of your hand.",
         ),
         // 3. Face rotation (ω×r) — the rotational component, with the
         // closing/brushing split when a face-up calibration exists.
         if (ss.hasComponents) ...[
           _chartSection(
-            "Face rotation (ω×r)",
+            "Face rotation",
             log,
             [ss.faceSpeed, ss.facePerp, ss.facePar],
             const [Colors.indigo, Colors.deepOrange, Colors.teal],
@@ -937,14 +939,17 @@ mixin _BleScreenUi on _BleScreenCore {
                 "∥ ${ss.maxFacePar.toStringAsFixed(1)} m/s",
             unit: "m/s",
             decimals: 2,
+            info:
+                "Rotation of the face, split into perpendicular and parallel "
+                "to the face.",
           ),
-          // 4. Spin index — brushing fraction of that rotation.
+          // 4. Spin ratio — brushing fraction of that rotation.
           _chartSection(
-            "Spin index (∥ brushing ÷ total)",
+            "Spin ratio",
             log,
             [spin!],
             const [Colors.purple],
-            const ["spin index"],
+            const ["spin ratio"],
             forcedMin: 0,
             forcedMax: 100,
             cornerText: hitSpin == null
@@ -953,10 +958,29 @@ mixin _BleScreenUi on _BleScreenCore {
                       "at hit: ${hitSpin.toStringAsFixed(0)}%",
             unit: "%",
             decimals: 0,
+            info: "Percentage of speed that contributes to spin.",
+          ),
+          // 5. Face angle — paddle-face tilt vs vertical through the swing.
+          _chartSection(
+            "Face angle",
+            log,
+            [ss.faceAngle],
+            const [Colors.brown],
+            const ["face angle"],
+            centerZero: true,
+            cornerText:
+                "${ss.faceAngleMin.toStringAsFixed(0)}° … "
+                "${ss.faceAngleMax.toStringAsFixed(0)}°",
+            unit: "°",
+            decimals: 0,
+            info:
+                "Tilt of the paddle face vs vertical through the swing. "
+                "+ = open / facing up (e.g. a push from below), "
+                "− = closed / facing down (e.g. a drive).",
           ),
         ] else ...[
           _chartSection(
-            "Face rotation (ω×r)",
+            "Face rotation",
             log,
             [ss.faceSpeed],
             const [Colors.indigo],
@@ -966,6 +990,9 @@ mixin _BleScreenUi on _BleScreenCore {
             cornerText: "max ${ss.maxFaceSpeed.toStringAsFixed(1)} m/s",
             unit: "m/s",
             decimals: 2,
+            info:
+                "Rotation of the face, split into perpendicular and parallel "
+                "to the face.",
           ),
           Padding(
             padding: const EdgeInsets.fromLTRB(12, 4, 12, 8),
@@ -976,7 +1003,7 @@ mixin _BleScreenUi on _BleScreenCore {
             ),
           ),
         ],
-        // 5. Raw accelerometer (toggle in Settings).
+        // 6. Raw accelerometer (toggle in Settings).
         if (_showAccelGraph)
           _chartSection(
             "Accelerometer (g)",
@@ -987,8 +1014,11 @@ mixin _BleScreenUi on _BleScreenCore {
             centerZero: true,
             unit: "g",
             decimals: 3,
+            info:
+                "Raw accelerometer reading along each board axis (g), "
+                "before any processing.",
           ),
-        // 6. Raw gyroscope (toggle in Settings).
+        // 7. Raw gyroscope (toggle in Settings).
         if (_showGyroGraph)
           _chartSection(
             "Gyroscope (°/s)",
@@ -999,6 +1029,9 @@ mixin _BleScreenUi on _BleScreenCore {
             centerZero: true,
             unit: "°/s",
             decimals: 1,
+            info:
+                "Raw gyroscope reading about each board axis (°/s), "
+                "before any processing.",
           ),
         const Divider(height: 1),
         Padding(
@@ -1083,15 +1116,23 @@ mixin _BleScreenUi on _BleScreenCore {
     bool centerZero = false,
     String unit = "",
     int decimals = 2,
+    String? info,
   }) {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         Padding(
           padding: const EdgeInsets.fromLTRB(12, 6, 12, 0),
-          child: Text(
-            title,
-            style: const TextStyle(fontWeight: FontWeight.bold),
+          child: Row(
+            children: [
+              Flexible(
+                child: Text(
+                  title,
+                  style: const TextStyle(fontWeight: FontWeight.bold),
+                ),
+              ),
+              if (info != null) _infoIcon(title, info),
+            ],
           ),
         ),
         SizedBox(
@@ -1121,6 +1162,33 @@ mixin _BleScreenUi on _BleScreenCore {
         ),
         if (labels != null) _legend(colors, labels),
       ],
+    );
+  }
+
+  // Small "ⓘ" next to a graph title; tapping pops up a one-line description.
+  Widget _infoIcon(String title, String info) {
+    return IconButton(
+      icon: const Icon(Icons.info_outline, size: 16),
+      iconSize: 16,
+      visualDensity: VisualDensity.compact,
+      padding: const EdgeInsets.only(left: 6),
+      constraints: const BoxConstraints(),
+      splashRadius: 16,
+      tooltip: info,
+      color: Colors.grey,
+      onPressed: () => showDialog<void>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          title: Text(title),
+          content: Text(info),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text("Got it"),
+            ),
+          ],
+        ),
+      ),
     );
   }
 
