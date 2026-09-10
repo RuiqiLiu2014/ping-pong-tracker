@@ -20,8 +20,6 @@
 
 ## Overview
 
-[ Short paragraph goes here: what the project is, the problem it solves, and the
-high-level idea. 3-5 sentences. ]
 There are sports trackers out there for racket sports, but they tend to be expensive, with ping pong being one of the most expensive as it generally relies on technology embedded within the racket itself. My goal is to create a budget-friendly alternative that can still accurately track metrics like swing speed, hit timing, and spin. My tracker uses a lightweight 3D printed case, housing a XIAO nRF52840 Sense microcontroller with a 6-axis IMU soldered to a 100 mAh LiPo battery pack. The whole unit weighs ~7g and is mounted to the base of the handle, and has features as described in the next section.
 
 ---
@@ -108,15 +106,18 @@ There are sports trackers out there for racket sports, but they tend to be expen
 
 ## Repository structure
 
-```
-[ repo tree goes here ]
-```
+- app: contains the flutter app
+- firmware: contains firmware deployed to the board for data collection
+- stls: contains STL files for 3D printed case
 
 ---
 
-## Roadmap
+## Next Steps
 
-- [ next step goes here ]
+- Implement a TinyML model to classify swings, allowing for grouping logs in the app based on swing type and better analysis among swings. Allows for focused improvement of certain swings.
+- Improved metrics and in-app analysis of multiple logs for better improvement.
+- Add a phone camera with YOLO to track the paddle frame by frame, allowing for more accurate metrics and live swing analysis.
+- Live AI coach within the app.
 
 ---
 
