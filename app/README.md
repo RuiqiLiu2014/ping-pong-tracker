@@ -1,4 +1,4 @@
-# ping_pong_tracker_app
+# app
 
 A new Flutter project.
 
