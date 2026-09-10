@@ -107,6 +107,7 @@ There are sports trackers out there for racket sports, but they tend to be expen
 ## Repository structure
 
 - app: contains the flutter app
+- calibration_drawings: contains SVG files for calibration wizard images
 - firmware: contains firmware deployed to the board for data collection
 - stls: contains STL files for 3D printed case
 
@@ -117,7 +118,7 @@ There are sports trackers out there for racket sports, but they tend to be expen
 - Implement a TinyML model to classify swings, allowing for grouping logs in the app based on swing type and better analysis among swings. Allows for focused improvement of certain swings.
 - Improved metrics and in-app analysis of multiple logs for better improvement.
 - Add a phone camera with YOLO to track the paddle frame by frame, allowing for more accurate metrics and live swing analysis.
-- Live AI coach within the app.
+- Add a live AI coach feature to the app.
 
 ---
 
