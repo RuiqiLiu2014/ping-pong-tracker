@@ -3,13 +3,9 @@
   Section order is recruiter-first: hook + demo at the very top, build/hardware
   details lower down. Keep the top third skimmable in ~30 seconds.
 -->
-CURRENTLY IN PROGRESS
-# [ Project title goes here ]
+# Ping Pong Tracker
 
-> [ One-sentence hook goes here — what it is + why it's impressive, in plain English. ]
-
-<!-- Optional badges (license, platform, build). Delete the line if unused. -->
-[ badges go here ]
+> An advanced ping pong paddle motion tracker, attached to the base of the handle, that sends 6-axis IMU data to a phone app at 1660 Hz via BLE. The phone app saves and displays the data in a readable format, analyzing hit time, paddle speed, spin ratio, and more for every shot, allowing users to easily analyze their shot quality and find shortcomings in their swings.
 
 ---
 
@@ -18,11 +14,7 @@ CURRENTLY IN PROGRESS
 <!-- Lead with an autoplaying GIF (plays inline, no click needed). Keep it 5-10s. -->
 ![ demo GIF goes here ]( path/to/demo.gif )
 
-**Full walkthrough video:** [ YouTube link goes here ]
-
-<!-- Alternative: a clickable video thumbnail instead of a raw link
-[![ watch the demo ]( thumbnail-image-goes-here )]( YouTube link goes here )
--->
+**Full demo video:** [ YouTube link goes here ]
 
 ---
 
@@ -30,14 +22,18 @@ CURRENTLY IN PROGRESS
 
 [ Short paragraph goes here: what the project is, the problem it solves, and the
 high-level idea. 3-5 sentences. ]
+There are sports trackers out there for racket sports, but they tend to be expensive, with ping pong being one of the most expensive as it generally relies on technology embedded within the racket itself. My goal is to create a budget-friendly alternative that can still accurately track metrics like swing speed, hit timing, and spin. My tracker uses a lightweight 3D printed case, housing a XIAO nRF52840 Sense microcontroller with a 6-axis IMU soldered to a 100 mAh LiPo battery pack. The whole unit weighs ~7g and is mounted to the base of the handle, and has features as described in the next section.
 
 ---
 
 ## Features
 
-- [ feature goes here ]
-- [ feature goes here ]
-- [ feature goes here ]
+- Accelerometer and gyroscope streaming at 1660 Hz to accurately capture swing motions
+- Automatic hit detection to automatically log data before and after each hit
+- Manual logging mode to log practice swings
+- Metrics for every log including swing speed, spin ratio, paddle orientation, and hit timing
+- Long lasting battery life with rechargeable battery pack via USB-C port
+- Straightforward app interface, colored themes, light and dark mode, and very flexible settings options
 
 ---
 
@@ -62,9 +58,10 @@ high-level idea. 3-5 sentences. ]
 ## Technical highlights
 
 <!-- The hard parts. This is what depth-checking engineers scan for. -->
-- [ technical highlight goes here ]
-- [ technical highlight goes here ]
-- [ technical highlight goes here ]
+- The 6-axis IMU streams at its maximum (hardware constrained) frequency of 1.66 kHz via BLE to the phone app, packaged with timestamps. App notifies the user of any dropped data packets.
+- Speed is calculated by integrating accelerometer data and combining with gyroscope data. Accelerometer data contains natural drift when integrated, so I used a dual endpoint ZUPT combined with direction reversal zeroing for drift correction and physical tests to verify the numbers.
+- The app has a calibration feature that is done at the start of each session, which calibrates by measuring gravitational acceleration in two paddle positions and allows for data such as paddle angle.
+- The app uses FFT to determine when the ball was hit using paddle vibrations and records these in each log, enabling the automatic logging feature that records one log per hit. This also enables the ability to analyze swing quality by looking at points of maximum speed and spin generation compared to hit timing.
 
 ---
 
@@ -75,9 +72,11 @@ high-level idea. 3-5 sentences. ]
 
 **Parts list**
 
-| Part | Notes |
-|---|---|
-| [ part goes here ] | [ notes go here ] |
+| Part | Notes | Link |
+|---|---|---|
+| XIAO nRF52840 Sense | microcontroller with 6-axis IMU | https://www.amazon.com/dp/B0DJ6PZGB7 |
+| 100 mAh LiPo Battery Pack | rechargeable battery pack to power the microcontroller | https://www.amazon.com/dp/B083NWXLTK |
+| 1P2T Mini Slide Switch | switch to turn the unit on and off | https://www.amazon.com/dp/B01N25FBWD |
 
 **3D-printed mount:** [ reference to print files goes here ]
 
