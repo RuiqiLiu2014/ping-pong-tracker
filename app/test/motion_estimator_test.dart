@@ -1,6 +1,6 @@
 import 'dart:math' as math;
 import 'package:flutter_test/flutter_test.dart';
-import 'package:ping_pong_tracker_app/motion_estimator.dart';
+import 'package:app/motion_estimator.dart';
 
 const int kOdr = 1660;
 
