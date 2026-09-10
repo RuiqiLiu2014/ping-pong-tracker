@@ -757,10 +757,10 @@ mixin _BleScreenUi on _BleScreenCore {
         log.axes,
         log.count,
         swingHpSec: _swingHpSec,
-        // The log's own captured calibration keeps its speeds/split stable;
-        // older logs without one fall back to the current calibration.
-        faceNormal: log.faceNormal ?? _faceNormal,
-        leverDir: log.leverDir ?? _leverDir,
+        // Each log carries its own captured calibration, so its speeds/split
+        // stay frozen and never shift when the paddle is recalibrated later.
+        faceNormal: log.faceNormal,
+        leverDir: log.leverDir,
       ),
     );
     // Fixed back/title/actions bar, then one lazy list holding the charts
