@@ -1,8 +1,3 @@
-<!--
-  README TEMPLATE — fill each bracketed placeholder, then delete these comments.
-  Section order is recruiter-first: hook + demo at the very top, build/hardware
-  details lower down. Keep the top third skimmable in ~30 seconds.
--->
 # Ping Pong Tracker
 
 > An advanced ping pong paddle motion tracker, attached to the base of the handle, that sends 6-axis IMU data to a phone app at 1660 Hz via BLE. The phone app saves and displays the data in a readable format, analyzing hit time, paddle speed, spin ratio, and more for every shot, allowing users to easily analyze their shot quality and find shortcomings in their swings.
