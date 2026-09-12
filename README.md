@@ -80,16 +80,41 @@ There are sports trackers out there for racket sports, but they tend to be expen
 
 ---
 
-## Build & run
+## Getting started
 
-Visit the releases page (https://github.com/RuiqiLiu2014/ping-pong-tracker/releases) and download the latest apk (app) and uf2 (firmware) files.
-### Install the firmware
-1. Plug in the XIAO nRF52840 Sense, and double tap the reset button to enter bootloader mode.
-2. Drag the uf2 file into the bootloader.
-### Download the app
-1. [todo]
+Download the latest **`.apk`** (app) and **`.uf2`** (firmware) from the
+[Releases page](https://github.com/RuiqiLiu2014/ping-pong-tracker/releases).
+
+1. **Flash the firmware** — plug the board into your computer with a USB-C data cable and double-tap the reset button to enter bootloader mode (a `XIAO-SENSE` drive appears). Drag the `.uf2` onto that drive; it flashes and reboots automatically.
+2. **Install the app** — on an Android phone, open the downloaded `.apk` and install it (allow "install from unknown sources" if prompted). *(Android only.)*
+3. **Power on** — mount the board at the base of the paddle handle and flip the switch on; the LED blinks blue while it looks for the app.
+4. **Connect & calibrate** — open the app, tap **Connect to Paddle**, then **Calibrate** and follow the two-pose wizard.
+5. **Play** — start swinging. Each hit is auto-detected and logged; open a log to see speed, spin, and orientation. Adjust settings and themes as desired. Read the user guide below for details.
 
 ---
+
+## User guide
+
+**Power & charging**
+- Flip the switch on the case to turn the board on.
+- **The board only charges while the switch is ON.** Flip it on, then plug in USB-C — the LED turns green (blinking while charging, solid when full). Charging pauses data streaming.
+
+**LED reference**
+
+| LED | Meaning |
+|---|---|
+| Blinking blue | Searching for the app |
+| Solid blue | Connected to the app |
+| Blinking green | Charging |
+| Solid green | Done charging |
+| Blinking red | Battery low, searching for the app |
+| Blinking red | Battery low, connected to the app |
+
+**Using the app**
+- **Calibrate** at the start of each session (two quick poses) for accurate speed and angle.
+- **Auto-capture** (default): every detected hit becomes its own log. Switch to manual logging mode if needed.
+- **Manual logging**: for practice swings with no ball — start/stop recording yourself (toggle in Settings).
+- Open a log to see swing speed, spin ratio, face angle, and hit timing; export as CSV from the log menu.
 
 ## Repository structure
 
@@ -100,7 +125,7 @@ Visit the releases page (https://github.com/RuiqiLiu2014/ping-pong-tracker/relea
 
 ---
 
-## Next Steps
+## Future Steps
 
 - Implement a TinyML model to classify swings, allowing for grouping logs in the app based on swing type and better analysis among swings. Allows for focused improvement of certain swings.
 - Improved metrics and in-app analysis of multiple logs.
@@ -112,4 +137,4 @@ Visit the releases page (https://github.com/RuiqiLiu2014/ping-pong-tracker/relea
 
 ## License
 
-[ license statement goes here ]
+This project is licensed under the MIT License — see [LICENSE](LICENSE) for details.
