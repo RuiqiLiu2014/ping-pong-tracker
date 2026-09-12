@@ -71,7 +71,15 @@ There are sports trackers out there for racket sports, but they tend to be expen
 | 100 mAh LiPo Battery Pack | rechargeable battery pack to power the microcontroller | https://www.amazon.com/dp/B083NWXLTK |
 | 1P2T Mini Slide Switch | switch to turn the unit on and off | https://www.amazon.com/dp/B01N25FBWD |
 
-**3D-printed mount:** [ reference to print files goes here ]
+**3D-printed mount (optional):** STL files for the case and lid are in [`stls/`](stls/) (`case.stl`, `lid.stl`). The printed mount is optional — it houses the board and battery and attaches to the base of the handle, but you can also secure the electronics directly to the paddle with tape or velcro.
+
+---
+
+## Assembly
+
+<!-- TODO: how to build the unit from the parts above — e.g. soldering the
+     battery + switch to the XIAO, seating everything in the printed case, and
+     mounting it on the paddle. (Getting started below assumes an assembled unit.) -->
 
 ---
 
@@ -103,7 +111,7 @@ Download the latest **`.apk`** (app) and **`.uf2`** (firmware) from the
 | Blinking green | Charging |
 | Solid green | Done charging |
 | Blinking red | Battery low, searching for the app |
-| Blinking red | Battery low, connected to the app |
+| Solid red | Battery low, connected to the app |
 
 **Using the app**
 - **Calibrate** at the start of each session (two quick poses) for accurate speed and angle.
