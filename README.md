@@ -20,7 +20,7 @@
 
 ## Overview
 
-There are sports trackers out there for racket sports, but they tend to be expensive, with ping pong being one of the most expensive as it generally relies on technology embedded within the paddle itself. My goal is to create a budget-friendly alternative that can still accurately track metrics like swing speed, hit timing, and spin. My tracker uses a lightweight 3D printed case, housing a XIAO nRF52840 Sense microcontroller with a 6-axis IMU soldered to a 100 mAh LiPo battery pack. The whole unit weighs ~7g and is mounted to the base of the handle, and has features as described in the next section.
+There are sports trackers out there for racket sports, but they tend to be expensive, with ping pong being one of the most expensive as it generally relies on technology embedded within the paddle itself. My goal is to create a budget-friendly alternative that can still accurately track metrics like swing speed, hit timing, and spin. My tracker uses a lightweight 3D printed case, housing a XIAO nRF52840 Sense microcontroller (with onboard 6-axis IMU) soldered to a 100 mAh LiPo battery pack. The whole unit weighs ~7g and is mounted to the base of the handle, and has features as described in the next section.
 
 ---
 
@@ -30,8 +30,8 @@ There are sports trackers out there for racket sports, but they tend to be expen
 - Automatic hit detection to automatically log data before and after each hit
 - Manual logging mode to log practice swings
 - Metrics for every log including swing speed, spin ratio, paddle orientation, and hit timing
-- Long lasting battery life with rechargeable battery pack via USB-C port
-- Straightforward app interface, colored themes, light and dark mode, and very flexible settings options
+- Rechargeable battery pack via USB-C port
+- Straightforward app interface, color themes, light and dark mode, and very flexible settings options
 
 ---
 
@@ -57,9 +57,9 @@ There are sports trackers out there for racket sports, but they tend to be expen
 
 <!-- The hard parts. This is what depth-checking engineers scan for. -->
 - The 6-axis IMU streams at its maximum (hardware constrained) frequency of 1.66 kHz via BLE to the phone app, packaged with timestamps. App notifies the user of any dropped data packets.
-- Speed is calculated by integrating accelerometer data and combining with gyroscope data. Accelerometer data contains natural drift when integrated, so I used a dual endpoint ZUPT combined with direction reversal zeroing for drift correction and physical tests to verify the numbers.
+- Speed is calculated by integrating accelerometer data and combining with gyroscope data. Accelerometer data contains natural drift when integrated, which is fixed by a centered moving average high-pass.
 - The app has a calibration feature that is done at the start of each session, which calibrates by measuring gravitational acceleration in two paddle positions and allows for data such as paddle angle.
-- The app uses FFT to determine when the ball was hit using paddle vibrations and records these in each log, enabling the automatic logging feature that records one log per hit. This also enables the ability to analyze swing quality by looking at points of maximum speed and spin generation compared to hit timing.
+- The app uses a 2-pole high pass filter to determine when the ball was hit by detecting high-frequency paddle vibrations and records these in each log, enabling the automatic logging feature that records one log per hit. This also enables the ability to analyze swing quality by looking at points of maximum speed and spin generation compared to hit timing.
 
 ---
 
@@ -82,25 +82,12 @@ There are sports trackers out there for racket sports, but they tend to be expen
 
 ## Build & run
 
-### Firmware
-
-```
-[ firmware build / flash steps go here ]
-```
-
-### App
-
-```
-[ app build / run steps go here ]
-```
-
----
-
-## Install the app (Android)
-
-**Download the APK:** [ GitHub Release link goes here ]
-
-<!-- Note here that the app needs the paddle hardware to do anything useful. -->
+Visit the releases page (https://github.com/RuiqiLiu2014/ping-pong-tracker/releases) and download the latest apk (app) and uf2 (firmware) files.
+### Install the firmware
+1. Plug in the XIAO nRF52840 Sense, and double tap the reset button to enter bootloader mode.
+2. Drag the uf2 file into the bootloader.
+### Download the app
+1. [todo]
 
 ---
 
@@ -116,7 +103,8 @@ There are sports trackers out there for racket sports, but they tend to be expen
 ## Next Steps
 
 - Implement a TinyML model to classify swings, allowing for grouping logs in the app based on swing type and better analysis among swings. Allows for focused improvement of certain swings.
-- Improved metrics and in-app analysis of multiple logs for better improvement.
+- Improved metrics and in-app analysis of multiple logs.
+- Use dual-endpoint ZUPT and direction-reversal zeroing for more accurate speed integration.
 - Add a phone camera with YOLO to track the paddle frame by frame, allowing for more accurate metrics and live swing analysis.
 - Add a live AI coach feature to the app.
 
