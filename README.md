@@ -157,6 +157,7 @@ shift if you recalibrate later.
 | Solid blue | Connected to the app |
 | Blinking green | Charging |
 | Solid green | Done charging |
+| Alternating green/red | Plugged in but not charging (flip the switch to charge) |
 | Blinking red | Battery low, searching for the app |
 | Solid red | Battery low, connected to the app |
 

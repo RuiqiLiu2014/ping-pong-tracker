@@ -38,7 +38,10 @@ BLECharacteristic verChar(UART_VER_UUID);
 // Batched notification buffer (firmware v1.1 packet)
 //   bytes 0..3 : uint32 LE  first-sample index (cumulative; resets on connect)
 //   bytes 4..7 : uint32 LE  first-sample timestamp = micros() from the chip
-//   byte  8    : battery % in bits 0..6; bit 7 = charging flag (fw >= 1.3)
+//   byte  8    : battery % in bits 0..6; bit 7 = charging LED state (fw >= 1.5:
+//                set while charging or topped off, clear when plugged but NOT
+//                charging — e.g. the on/off switch is off. fw 1.3-1.4 set it
+//                whenever plugged in.)
 //   byte  9    : number of samples N in this packet
 //   bytes 10..11 : uint16 LE  battery millivolts (fw >= 1.3; 0 if unread)
 //   then N * 12 bytes: int16 LE  ax, ay, az, gx, gy, gz  (raw sensor counts)
@@ -47,9 +50,10 @@ BLECharacteristic verChar(UART_VER_UUID);
 // the LSM6DS3 sensitivities (accel +/-16g, gyro 2000 dps).
 // Byte 8's coarse % stays for backward compatibility; fw >= 1.3 also sends the
 // raw millivolts (bytes 10..11) so the app can map SoC on a real LiPo curve at
-// sub-1% resolution. While charging (fw >= 1.3) the board does NOT stream IMU
-// data: it sends a header-only status packet (N = 0, battery byte bit 7 set,
-// plus the mV) ~2 Hz instead, so the app shows a dedicated charging state.
+// sub-1% resolution. While plugged into USB (fw >= 1.3) the board does NOT stream
+// IMU data: it sends a header-only status packet (N = 0, plus the mV) ~1 Hz
+// instead. The app treats any N = 0 packet as this plugged/no-stream state, and
+// reads bit 7 to show either "charging" (set) or "not charging" (clear).
 // =====================================================
 #define PKT_HEADER    12
 #define MAX_SAMPLES   19              // 12 + 19*12 = 240 bytes, fits a 247-byte MTU
@@ -91,11 +95,12 @@ uint32_t lastStatusMs = 0;       // cadence for charging-status packets
 #define LED_DUTY_RED   128   // ~50% (tune later)
 #define BATT_LOW_MV   3730   // low-battery: matches the app's red threshold (LiPo 20%)
 #define BATT_LOW_CLR  3770   // hysteresis: clear "low" only once back above this
-// Plugged + not charging + VBAT below this => no healthy cell is connected (the
-// switch is off), not a completed charge. A charged cell reads ~4.1-4.2 V, and a
-// connected-but-low cell would be actively charging (so it never lands here), so
-// this cleanly separates "charge complete" from "switch off / no battery".
-#define BATT_PRESENT_MV 3900
+// Plugged + not charging + VBAT below this => treat as "not charging" (typically
+// the on/off switch is off, so no real cell is on the divider) rather than a
+// completed charge. Set near a full cell so a merely-high battery with the switch
+// off still nudges the user: the app stretches its LiPo curve, so this ~4.10 V
+// maps to ~95% shown — only a nearly-full cell reads solid-green "charge done".
+#define BATT_PRESENT_MV 4100
 bool lowBatt = false;
 enum LedColor { LED_C_OFF, LED_C_BLUE, LED_C_GREEN, LED_C_RED };
 
@@ -293,7 +298,12 @@ void loop() {
     uint32_t nowMs = millis();
     if (nowMs - lastStatusMs >= 1000) {     // ~1 Hz status while plugged (low rate)
       memset(txbuf, 0, PKT_HEADER);
-      txbuf[8] = (uint8_t)(batteryPct | 0x80);  // bit7 = charging
+      // bit7 mirrors the green charging LED: set while actively charging or
+      // topped off, clear when plugged but not charging (switch off). N = 0
+      // marks this as a status (no-stream) packet regardless of bit7.
+      const bool chargingLed = chargeActive || (batteryMv >= BATT_PRESENT_MV);
+      txbuf[8] = (uint8_t)(batteryPct & 0x7F);
+      if (chargingLed) txbuf[8] |= 0x80;
       txbuf[9] = 0;                             // N = 0 (no samples)
       memcpy(&txbuf[10], &batteryMv, 2);        // raw cell mV
       txChar.notify(txbuf, PKT_HEADER);
