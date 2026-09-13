@@ -47,6 +47,11 @@ mixin _BleScreenCore
   // Board reports it is charging (fw >= 1.3). While set, the paddle stops
   // streaming IMU data and the % is allowed to rise (the never-rise clamp off).
   bool _charging = false;
+  // Board is plugged into USB but NOT charging (the on/off switch is off, so the
+  // cell is disconnected). Streaming is paused like _charging, but we show a red
+  // "Not charging" state and FREEZE the % — the VBAT reading drifts with no real
+  // cell on the divider, so tracking it would crater the gauge. (fw >= 1.5)
+  bool _notCharging = false;
 
   // Orientation + velocity estimator (sensor fusion), fed every sample.
   final MotionEstimator _motion = MotionEstimator();
@@ -781,9 +786,13 @@ mixin _BleScreenCore
     final bd = ByteData.view(Uint8List.fromList(value).buffer);
     final int count = value[9];
     final int battByte = value[8];
-    // Bit 7 of the battery byte marks "charging"; while charging the board sends
-    // header-only status packets (N = 0, no IMU stream).
-    final bool charging = (battByte & 0x80) != 0;
+    // N == 0 marks a header-only STATUS packet: the board is plugged into USB and
+    // has paused IMU streaming (streaming packets always carry N >= 1). Bit 7 then
+    // mirrors the board's green charging LED — set while charging or topped off,
+    // clear when plugged but NOT charging (the on/off switch is off, so the cell
+    // is disconnected). (fw 1.3-1.4 set bit 7 whenever plugged; still handled.)
+    final bool isStatus = count == 0;
+    final bool chargingLed = (battByte & 0x80) != 0;
     // Raw cell millivolts -> SoC on a real LiPo curve at sub-1% resolution. An
     // unread mV is 0 (e.g. a packet in the first ~2 s before the board's ADC
     // block runs), which would map to a spurious 0% and get pinned by the
@@ -794,30 +803,46 @@ mixin _BleScreenCore
         ? _lipoPercentFromMv(battMv)
         : (battByte & 0x7F).toDouble();
 
-    // A charging-status packet always sets the charging bit; streaming packets
-    // never carry N == 0, so the charging bit alone selects this branch.
-    if (charging) {
-      if (!_charging) {
-        // Entering the charging state.
-        _charging = true;
-        _connectionStatus = "Charging";
-        _sampleRateStr = "0";
+    if (isStatus) {
+      if (chargingLed) {
+        // Charging (or charge-complete): the rise is real, so lift the never-rise
+        // clamp and track the % up. Show the green "Charging" state.
+        if (!_charging || _notCharging) {
+          _charging = true;
+          _notCharging = false;
+          _connectionStatus = "Charging";
+          _sampleRateStr = "0";
+        }
+        _updateBattery(battPct, charging: true);
+      } else {
+        // Plugged but NOT charging (switch off). The VBAT reading drifts down with
+        // no real cell on the divider, so FREEZE the shown % rather than chase it
+        // into the ground. Seed once if we have no reading yet so the gauge shows
+        // something plausible instead of 0%. Show the red "Not charging" state.
+        if (!_notCharging || _charging) {
+          _notCharging = true;
+          _charging = false;
+          _connectionStatus = "Not charging";
+          _sampleRateStr = "0";
+        }
+        if (_batterySmoothed < 0) _updateBattery(battPct, charging: false);
       }
-      _updateBattery(battPct, charging: true);
-      return; // no IMU samples to process while charging
+      return; // no IMU samples in a status packet
     }
 
-    // Left the charging state (unplugged mid-connection): resume streaming and
-    // re-seed the chip-time base so the gap doesn't skew the timeline/rate.
-    if (_charging) {
+    // Streaming packet (N >= 1). If we were plugged in, the cable just came out:
+    // resume streaming and re-seed the chip-time base so the gap doesn't skew the
+    // timeline/rate.
+    if (_charging || _notCharging) {
       _charging = false;
+      _notCharging = false;
       _connectionStatus = "Streaming Data";
       _haveChipRef = false;
       _windowStart = null;
       _lastChipTsec = 0;
     }
 
-    if (count < 1 || value.length < hdr + count * 12) return;
+    if (value.length < hdr + count * 12) return;
     _updateBattery(battPct, charging: false);
 
     final now = DateTime.now();
@@ -1008,6 +1033,7 @@ mixin _BleScreenCore
       _batterySmoothed = -1; // fresh session -> re-seed the smoother
       _batteryShown = -1;
       _charging = false;
+      _notCharging = false;
       _firmwareVersion = "?";
       _fwOutdated = false;
       _calReminderDue = false;

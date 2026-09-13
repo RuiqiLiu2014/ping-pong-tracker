@@ -40,7 +40,9 @@ mixin _BleScreenUi on _BleScreenCore {
                       "app v$kAppVersion",
                       style: const TextStyle(fontSize: 11),
                     ),
-                    if (_connectionStatus == "Streaming Data" || _charging)
+                    if (_connectionStatus == "Streaming Data" ||
+                        _charging ||
+                        _notCharging)
                       Text(
                         "fw v$_firmwareVersion",
                         style: const TextStyle(fontSize: 11),
@@ -194,9 +196,10 @@ mixin _BleScreenUi on _BleScreenCore {
   Widget _buildConnectionTab() {
     final streaming = _connectionStatus == "Streaming Data";
     final charging = _charging;
+    final notCharging = _notCharging;
     // Connected (so Connect flips to Disconnect) whenever a BLE link is held —
-    // streaming, charging, or firmware-too-old-to-stream.
-    final connected = streaming || charging || _fwOutdated;
+    // streaming, charging, plugged-but-not-charging, or firmware-too-old.
+    final connected = streaming || charging || notCharging || _fwOutdated;
     // Neutral black/white for button text instead of the theme accent colour.
     final btnText = Theme.of(context).brightness == Brightness.dark
         ? Colors.white
@@ -226,11 +229,11 @@ mixin _BleScreenUi on _BleScreenCore {
             "Sample Rate: $_sampleRateStr Hz",
             style: const TextStyle(fontSize: 16, color: Colors.grey),
           ),
-          if (streaming || charging) ...[
+          if (streaming || charging || notCharging) ...[
             const SizedBox(height: 10),
             _batteryIndicator(
               int.tryParse(_batteryPct) ?? 0,
-              charging: charging,
+              charging: charging, // bolt only while actually charging
             ),
           ],
           const SizedBox(height: 28),
@@ -289,7 +292,9 @@ mixin _BleScreenUi on _BleScreenCore {
               ),
             ),
           OutlinedButton.icon(
-            onPressed: (charging || _fwOutdated) ? null : _openCalibration,
+            onPressed: (charging || notCharging || _fwOutdated)
+                ? null
+                : _openCalibration,
             style: OutlinedButton.styleFrom(foregroundColor: btnText),
             icon: const Icon(Icons.explore),
             label: const Text("Calibrate"),
