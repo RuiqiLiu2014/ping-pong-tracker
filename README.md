@@ -119,6 +119,8 @@ Download the latest **`.apk`** (app) and **`.uf2`** (firmware) from the
 - **Manual logging**: for practice swings with no ball — start/stop recording yourself (toggle in Settings).
 - Open a log to see swing speed, spin ratio, face angle, and hit timing; export as CSV from the log menu.
 
+---
+
 ## Repository structure
 
 - app: contains the flutter app
