@@ -41,10 +41,58 @@ There are sports trackers out there for racket sports, but they tend to be expen
 
 ## How it works
 
-<!-- Architecture / data-flow diagram (image or ASCII). Shows systems thinking. -->
-![ architecture diagram goes here ]()
+The paddle is a fast, "dumb" streamer — it just samples and ships raw IMU data;
+**all interpretation happens on the phone.**
 
-[ Short explanation of the end-to-end pipeline goes here. ]
+```mermaid
+flowchart TD
+  subgraph PADDLE["Paddle unit — XIAO nRF52840 Sense"]
+    IMU["LSM6DS3 IMU<br/>accel + gyro @ 1660 Hz"]
+    FW["Firmware: batch samples<br/>12-byte header + up to 19×12-byte samples<br/>flush when full / every 15 ms"]
+    IMU --> FW
+  end
+  FW -->|"BLE notify — Nordic UART<br/>~1.66 kHz, batched, MTU 247"| PARSE
+  subgraph PHONE["Phone app — Flutter"]
+    PARSE["Parse packets<br/>rebuild µs timeline from sample index<br/>· flag dropped samples"]
+    LIVE["Live readouts<br/>orientation + ω×r face speed"]
+    HIT["Hit detection<br/>2-pole ~120 Hz high-pass + envelope"]
+    CAP["Auto-capture<br/>ring buffer → one log per hit (±window)"]
+    ANALYZE["Per-log analysis<br/>• swing speed: ∫accel + high-pass detrend<br/>• face speed: ω×r drift-free → ⟂/∥ split → spin ratio<br/>• face angle vs vertical"]
+    STORE["Store &amp; view<br/>interactive graphs · CSV / ZIP export"]
+    CAL["Session calibration<br/>2 poses → face normal + lever direction"]
+    PARSE --> LIVE
+    PARSE --> HIT --> CAP --> ANALYZE --> STORE
+    CAL -.-> ANALYZE
+    CAL -.-> LIVE
+  end
+```
+
+**End to end:**
+
+1. **Sample** — the XIAO's LSM6DS3 reads accelerometer + gyroscope at 1660 Hz.
+2. **Batch & stream** — the firmware packs samples into BLE notifications over the
+   Nordic UART service: a 12-byte header (sample index, timestamp, battery, count,
+   cell mV) plus up to 19 samples (6× int16 each), flushed when the buffer fills or
+   every 15 ms, sized to the negotiated MTU and ~7.5–15 ms connection interval.
+3. **Parse** — the phone rebuilds an absolute microsecond timeline from the
+   per-sample index, so a lost packet shows up as a time gap and is flagged as
+   dropped samples; raw counts are scaled to g and °/s.
+4. **Detect hits** — a 2-pole ~120 Hz high-pass plus an envelope follower isolates
+   the ball's high-frequency impact "ring" from low-frequency swing motion and
+   fires once per hit.
+5. **Capture** — in auto mode a ring buffer holds the last few seconds, so each hit
+   is cut into its own log (a window before and after the impact).
+6. **Analyze each log** — replaying its samples yields swing (hand) speed by
+   integrating gravity-removed acceleration and high-pass-detrending the drift;
+   drift-free **face speed** from ω×r, split via the session calibration into
+   perpendicular (closing) and parallel (brushing) parts to give the **spin ratio**;
+   and the **face angle** relative to vertical.
+7. **Store & export** — logs are saved as binary files and shown as interactive
+   graphs, exportable to CSV/ZIP.
+
+A quick two-pose calibration at the start of each session fixes the paddle's face
+normal and lever direction; these are **frozen into each log**, so metrics never
+shift if you recalibrate later.
 
 ---
 
