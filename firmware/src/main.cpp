@@ -25,7 +25,7 @@ const uint8_t UART_TX_UUID[16] = {
   0x93, 0xF3, 0xA3, 0xB5, 0x03, 0x00, 0x40, 0x6E};
 // Firmware version string, exposed as a READ characteristic (UUID ...0004...)
 // so the app can show it on connect. Bump on firmware changes (1.0, 1.1, ...).
-#define FW_VERSION "1.4"
+#define FW_VERSION "1.5"
 const uint8_t UART_VER_UUID[16] = {
   0x9E, 0xCA, 0xDC, 0x24, 0x0E, 0xE5, 0xA9, 0xE0,
   0x93, 0xF3, 0xA3, 0xB5, 0x04, 0x00, 0x40, 0x6E};
@@ -79,6 +79,9 @@ uint32_t lastStatusMs = 0;       // cadence for charging-status packets
 // active-LOW (pin LOW = lit) — the variant's LED_STATE_ON is wrong, so we don't
 // use it. Only one die is ever lit, so colours never blend.
 //   Plugged in: green — blink while charging, solid once full / charge-complete.
+//   Plugged but NOT charging with no healthy cell reading (e.g. the on/off switch
+//     is off, so the battery is disconnected): alternating green/red as a
+//     "flip the switch" reminder.
 //   On battery: blue (ok) or red (low) — blink while BLE-searching, solid when
 //               BLE-connected.  (off only when powered down)
 #define LED_BLINK_MS   300   // half-period of the searching / charging flash
@@ -88,6 +91,11 @@ uint32_t lastStatusMs = 0;       // cadence for charging-status packets
 #define LED_DUTY_RED   128   // ~50% (tune later)
 #define BATT_LOW_MV   3730   // low-battery: matches the app's red threshold (LiPo 20%)
 #define BATT_LOW_CLR  3770   // hysteresis: clear "low" only once back above this
+// Plugged + not charging + VBAT below this => no healthy cell is connected (the
+// switch is off), not a completed charge. A charged cell reads ~4.1-4.2 V, and a
+// connected-but-low cell would be actively charging (so it never lands here), so
+// this cleanly separates "charge complete" from "switch off / no battery".
+#define BATT_PRESENT_MV 3900
 bool lowBatt = false;
 enum LedColor { LED_C_OFF, LED_C_BLUE, LED_C_GREEN, LED_C_RED };
 
@@ -158,8 +166,18 @@ void updateStatusLed() {
   LedColor color;
   bool on;
   if (pluggedIn) {
-    color = LED_C_GREEN;
-    on = chargeActive ? blink : true;   // blink while charging, solid when full
+    if (chargeActive) {
+      color = LED_C_GREEN;              // actively charging -> blinking green
+      on = blink;
+    } else if (batteryMv >= BATT_PRESENT_MV) {
+      color = LED_C_GREEN;              // charge complete -> solid green
+      on = true;
+    } else {
+      // Plugged, not charging, and no healthy cell reading: the switch is off
+      // (battery disconnected). Alternate green/red as a "flip the switch" nudge.
+      color = blink ? LED_C_GREEN : LED_C_RED;
+      on = true;
+    }
   } else {
     color = lowBatt ? LED_C_RED : LED_C_BLUE;
     on = connected ? true : blink;      // solid when connected, blink when searching
