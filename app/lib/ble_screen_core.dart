@@ -150,8 +150,6 @@ mixin _BleScreenCore
   bool _resetLogsOnLeave = true; // leaving Logs tab returns to the list
   bool _hoverPersists = false; // graph hover readout stays after lifting finger
   HoverReadoutPos _hoverPos = HoverReadoutPos.follow; // hover readout side
-  bool _timeMicros = false; // show time in µs (else ms with _timeDecimals)
-  int _timeDecimals = 3; // ms decimal places (0-3) when not showing µs
   // Data captured before AND after each hit (s). Default 0.9 s: just under the
   // ~1.1 s between a single player's own hits in a rally, so a log typically
   // holds one hit. User-adjustable in Settings (0.25–2.0 s).
@@ -162,6 +160,14 @@ mixin _BleScreenCore
   double _minScaleMps = 5.0; // min top of the speed-graph y-axis (0 = off)
   bool _showAccelGraph = true; // show the raw accelerometer graph in log detail
   bool _showGyroGraph = true; // show the raw gyroscope graph in log detail
+  // "Graphs to display" checklist — which processed charts each log shows. The
+  // calibration-gated ones (spin ratio, face angle) still only render when a
+  // face-up calibration exists, regardless of these toggles.
+  bool _showFaceSpeed = true;
+  bool _showSwingSpeed = true;
+  bool _showFaceRotation = true;
+  bool _showSpinRatio = true;
+  bool _showFaceAngle = true;
   // Paddle-face normal in the board frame from the last face-up calibration
   // (persisted). Used live and to split recorded logs into closing/brushing.
   List<double>? _faceNormal;
@@ -242,11 +248,14 @@ mixin _BleScreenCore
     final minScale = prefs.getDouble(_kMinScaleKey);
     final showAccel = prefs.getBool(_kShowAccelKey);
     final showGyro = prefs.getBool(_kShowGyroKey);
+    final showFaceSpeed = prefs.getBool(_kShowFaceSpeedKey);
+    final showSwingSpeed = prefs.getBool(_kShowSwingSpeedKey);
+    final showFaceRotation = prefs.getBool(_kShowFaceRotationKey);
+    final showSpinRatio = prefs.getBool(_kShowSpinRatioKey);
+    final showFaceAngle = prefs.getBool(_kShowFaceAngleKey);
     final resetLogs = prefs.getBool(_kResetLogsKey);
     final hoverPersist = prefs.getBool(_kHoverPersistKey);
     final hoverPosStr = prefs.getString(_kHoverPosKey);
-    final timeMicros = prefs.getBool(_kTimeMicrosKey);
-    final timeDec = prefs.getInt(_kTimeDecimalsKey);
     final fnx = prefs.getDouble(_kFaceNormXKey);
     final fny = prefs.getDouble(_kFaceNormYKey);
     final fnz = prefs.getDouble(_kFaceNormZKey);
@@ -265,8 +274,6 @@ mixin _BleScreenCore
           orElse: () => HoverReadoutPos.follow,
         );
       }
-      if (timeMicros != null) _timeMicros = timeMicros;
-      if (timeDec != null) _timeDecimals = timeDec.clamp(0, 3);
       if (win != null) _hitWindowSec = win.clamp(0.25, 2.0);
       if (timeout != null) _manualTimeoutSec = timeout.clamp(0.1, 5.0);
       if (hitThr != null) _hitThreshG = hitThr.clamp(0.1, 1.5);
@@ -274,6 +281,11 @@ mixin _BleScreenCore
       if (minScale != null) _minScaleMps = minScale.clamp(0.0, 20.0);
       if (showAccel != null) _showAccelGraph = showAccel;
       if (showGyro != null) _showGyroGraph = showGyro;
+      if (showFaceSpeed != null) _showFaceSpeed = showFaceSpeed;
+      if (showSwingSpeed != null) _showSwingSpeed = showSwingSpeed;
+      if (showFaceRotation != null) _showFaceRotation = showFaceRotation;
+      if (showSpinRatio != null) _showSpinRatio = showSpinRatio;
+      if (showFaceAngle != null) _showFaceAngle = showFaceAngle;
       if (fnx != null && fny != null && fnz != null) {
         _faceNormal = [fnx, fny, fnz];
         _motion.setFaceNormal(fnx, fny, fnz);
@@ -1021,7 +1033,10 @@ mixin _BleScreenCore
   void _resetConnectionUi() {
     _scanTimeoutTimer?.cancel();
     if (!mounted) return;
-    _prefs?.setInt(_kUseSinceCalKey, _useSinceCal); // flush hits since last save
+    _prefs?.setInt(
+      _kUseSinceCalKey,
+      _useSinceCal,
+    ); // flush hits since last save
     setState(() {
       _targetDevice = null;
       _isConnecting = false;
@@ -1152,7 +1167,8 @@ mixin _BleScreenCore
 
     // Once a hit's after-window has fully streamed in, cut it its own log. Nearby
     // hits' windows overlap and each still gets a log (that duplication is fine).
-    while (_pendingHits.isNotEmpty && (t - _pendingHits.first) >= _hitWindowSec) {
+    while (_pendingHits.isNotEmpty &&
+        (t - _pendingHits.first) >= _hitWindowSec) {
       _extractHitLog(_pendingHits.removeAt(0));
       // A new log just landed; refresh so it appears even if the repaint timer is
       // paused (e.g. watching captures roll in on the Logs tab).
@@ -1571,16 +1587,12 @@ mixin _BleScreenCore
     }
   }
 
-  // Per-sample time (stored in seconds) formatted for display, per settings:
-  // microseconds (integer) or milliseconds with 0–3 decimals.
-  String _fmtTimeValue(double tSec) => _timeMicros
-      ? (tSec * 1e6).round().toString()
-      : (tSec * 1000).toStringAsFixed(_timeDecimals);
-  String _fmtTimeLabel(double tSec) =>
-      _timeMicros ? "${_fmtTimeValue(tSec)} µs" : "${_fmtTimeValue(tSec)} ms";
-  String get _timeColHeader => _timeMicros ? "time_us" : "time_ms";
-  int get _timeColWidth =>
-      _timeMicros ? 9 : (6 + (_timeDecimals > 0 ? _timeDecimals + 1 : 0));
+  // Per-sample time (stored in seconds) formatted for display: milliseconds
+  // with 3 decimals.
+  String _fmtTimeValue(double tSec) => (tSec * 1000).toStringAsFixed(3);
+  String _fmtTimeLabel(double tSec) => "${_fmtTimeValue(tSec)} ms";
+  String get _timeColHeader => "time_ms";
+  int get _timeColWidth => 10; // "1234.567" — ms with 3 decimals
 
   String _fmtDateTime(DateTime d) =>
       "${d.year}-${d.month.toString().padLeft(2, '0')}-"

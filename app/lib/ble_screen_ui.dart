@@ -267,7 +267,7 @@ mixin _BleScreenUi on _BleScreenCore {
             ),
           const SizedBox(height: 16),
           const Text(
-            "Face speed (ω×r)",
+            "Face rotation",
             style: TextStyle(fontWeight: FontWeight.bold),
           ),
           Text(
@@ -292,9 +292,9 @@ mixin _BleScreenUi on _BleScreenCore {
               ),
             ),
           OutlinedButton.icon(
-            onPressed: (charging || notCharging || _fwOutdated)
-                ? null
-                : _openCalibration,
+            // Calibration reads live IMU data, so it's only available while
+            // streaming (disabled when disconnected, plugged in, or fw-outdated).
+            onPressed: streaming ? _openCalibration : null,
             style: OutlinedButton.styleFrom(foregroundColor: btnText),
             icon: const Icon(Icons.explore),
             label: const Text("Calibrate"),
@@ -900,90 +900,95 @@ mixin _BleScreenUi on _BleScreenCore {
             ),
           ),
         // 1. True face speed = swing translation + ω×r rotation (headline).
-        _chartSection(
-          "Face speed",
-          log,
-          [ss.trueFaceSpeed],
-          const [Colors.indigo],
-          const ["face speed"],
-          forcedMin: 0,
-          minTop: _minScaleMps,
-          cornerText: "max ${ss.maxTrueFaceSpeed.toStringAsFixed(1)} m/s",
-          unit: "m/s",
-          decimals: 2,
-          info: "Speed of the paddle face.",
-        ),
+        if (_showFaceSpeed)
+          _chartSection(
+            "Face speed",
+            log,
+            [ss.trueFaceSpeed],
+            const [Colors.indigo],
+            const ["face speed"],
+            forcedMin: 0,
+            minTop: _minScaleMps,
+            cornerText: "max ${ss.maxTrueFaceSpeed.toStringAsFixed(1)} m/s",
+            unit: "m/s",
+            decimals: 2,
+            info: "Speed of the paddle face.",
+          ),
         // 2. Swing speed (translation only, drift-corrected accel).
-        _chartSection(
-          "Swing speed",
-          log,
-          [ss.swingSpeed],
-          const [Colors.blue],
-          const ["swing speed"],
-          forcedMin: 0,
-          minTop: _minScaleMps,
-          cornerText: "max ${ss.maxSwingSpeed.toStringAsFixed(1)} m/s",
-          unit: "m/s",
-          decimals: 2,
-          info: "Speed of your hand.",
-        ),
+        if (_showSwingSpeed)
+          _chartSection(
+            "Swing speed",
+            log,
+            [ss.swingSpeed],
+            const [Colors.blue],
+            const ["swing speed"],
+            forcedMin: 0,
+            minTop: _minScaleMps,
+            cornerText: "max ${ss.maxSwingSpeed.toStringAsFixed(1)} m/s",
+            unit: "m/s",
+            decimals: 2,
+            info: "Speed of your hand.",
+          ),
         // 3. Face rotation (ω×r) — the rotational component, with the
         // closing/brushing split when a face-up calibration exists.
         if (ss.hasComponents) ...[
-          _chartSection(
-            "Face rotation",
-            log,
-            [ss.faceSpeed, ss.facePerp, ss.facePar],
-            const [Colors.indigo, Colors.deepOrange, Colors.teal],
-            const ["total", "⟂", "∥"],
-            forcedMin: 0,
-            minTop: _minScaleMps,
-            cornerText:
-                "max ${ss.maxFaceSpeed.toStringAsFixed(1)} · "
-                "⟂ ${ss.maxFacePerp.toStringAsFixed(1)} · "
-                "∥ ${ss.maxFacePar.toStringAsFixed(1)} m/s",
-            unit: "m/s",
-            decimals: 2,
-            info:
-                "Rotation of the face, split into perpendicular and parallel "
-                "to the face.",
-          ),
+          if (_showFaceRotation)
+            _chartSection(
+              "Face rotation",
+              log,
+              [ss.faceSpeed, ss.facePerp, ss.facePar],
+              const [Colors.indigo, Colors.deepOrange, Colors.teal],
+              const ["total", "⟂", "∥"],
+              forcedMin: 0,
+              minTop: _minScaleMps,
+              cornerText:
+                  "max ${ss.maxFaceSpeed.toStringAsFixed(1)} · "
+                  "⟂ ${ss.maxFacePerp.toStringAsFixed(1)} · "
+                  "∥ ${ss.maxFacePar.toStringAsFixed(1)} m/s",
+              unit: "m/s",
+              decimals: 2,
+              info:
+                  "Rotation of the face, split into perpendicular and parallel "
+                  "to the face.",
+            ),
           // 4. Spin ratio — brushing fraction of that rotation.
-          _chartSection(
-            "Spin ratio",
-            log,
-            [spin!],
-            const [Colors.purple],
-            const ["spin ratio"],
-            forcedMin: 0,
-            forcedMax: 100,
-            cornerText: hitSpin == null
-                ? "at peak ω×r: ${peakSpin.toStringAsFixed(0)}%"
-                : "at peak ω×r: ${peakSpin.toStringAsFixed(0)}%\n"
-                      "at hit: ${hitSpin.toStringAsFixed(0)}%",
-            unit: "%",
-            decimals: 0,
-            info: "Percentage of speed that contributes to spin.",
-          ),
+          if (_showSpinRatio)
+            _chartSection(
+              "Spin ratio",
+              log,
+              [spin!],
+              const [Colors.purple],
+              const ["spin ratio"],
+              forcedMin: 0,
+              forcedMax: 100,
+              cornerText: hitSpin == null
+                  ? "at peak ω×r: ${peakSpin.toStringAsFixed(0)}%"
+                  : "at peak ω×r: ${peakSpin.toStringAsFixed(0)}%\n"
+                        "at hit: ${hitSpin.toStringAsFixed(0)}%",
+              unit: "%",
+              decimals: 0,
+              info: "Percentage of speed that contributes to spin.",
+            ),
           // 5. Face angle — paddle-face tilt vs vertical through the swing.
-          _chartSection(
-            "Face angle",
-            log,
-            [ss.faceAngle],
-            const [Colors.brown],
-            const ["face angle"],
-            centerZero: true,
-            cornerText:
-                "${ss.faceAngleMin.toStringAsFixed(0)}° … "
-                "${ss.faceAngleMax.toStringAsFixed(0)}°",
-            unit: "°",
-            decimals: 0,
-            info:
-                "Tilt of the paddle face vs vertical through the swing. "
-                "+ = open / facing up (e.g. a push from below), "
-                "− = closed / facing down (e.g. a drive).",
-          ),
-        ] else ...[
+          if (_showFaceAngle)
+            _chartSection(
+              "Face angle",
+              log,
+              [ss.faceAngle],
+              const [Colors.brown],
+              const ["face angle"],
+              centerZero: true,
+              cornerText:
+                  "${ss.faceAngleMin.toStringAsFixed(0)}° … "
+                  "${ss.faceAngleMax.toStringAsFixed(0)}°",
+              unit: "°",
+              decimals: 0,
+              info:
+                  "Tilt of the paddle face vs vertical through the swing. "
+                  "+ = open / facing up (e.g. a push from below), "
+                  "− = closed / facing down (e.g. a drive).",
+            ),
+        ] else if (_showFaceRotation) ...[
           _chartSection(
             "Face rotation",
             log,
@@ -1206,7 +1211,10 @@ mixin _BleScreenUi on _BleScreenCore {
     final Color bg = dark ? const Color(0xF21E1E1E) : const Color(0xF2FFFFFF);
     final Color border = dark ? Colors.white24 : Colors.black26;
     final Color ink = dark ? Colors.white : Colors.black87;
-    final double maxW = (overlaySize.width - anchor.dx - 24).clamp(120.0, 280.0);
+    final double maxW = (overlaySize.width - anchor.dx - 24).clamp(
+      120.0,
+      280.0,
+    );
 
     _infoBubbleOwner = iconCtx;
     _infoBubble = OverlayEntry(
@@ -1223,7 +1231,10 @@ mixin _BleScreenUi on _BleScreenCore {
             left: anchor.dx + 2,
             top: anchor.dy,
             child: FractionalTranslation(
-              translation: const Offset(0, -0.5), // centre the bubble on the icon
+              translation: const Offset(
+                0,
+                -0.5,
+              ), // centre the bubble on the icon
               child: Material(
                 color: Colors.transparent,
                 child: Row(
@@ -1436,36 +1447,8 @@ mixin _BleScreenUi on _BleScreenCore {
           onChanged: _setAutoLogging,
         ),
         const Divider(height: 24),
-        ..._hitDetectionSettings(),
-        const Divider(height: 24),
-        ..._paddleSpeedSettings(),
-        const Divider(height: 24),
-        SwitchListTile(
-          contentPadding: EdgeInsets.zero,
-          title: const Text(
-            "Show accelerometer graph",
-            style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
-          ),
-          subtitle: const Text("The raw accelerometer (g) trace in each log."),
-          value: _showAccelGraph,
-          onChanged: (v) {
-            setState(() => _showAccelGraph = v);
-            _prefs?.setBool(_kShowAccelKey, v);
-          },
-        ),
-        SwitchListTile(
-          contentPadding: EdgeInsets.zero,
-          title: const Text(
-            "Show gyroscope graph",
-            style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
-          ),
-          subtitle: const Text("The raw gyroscope (°/s) trace in each log."),
-          value: _showGyroGraph,
-          onChanged: (v) {
-            setState(() => _showGyroGraph = v);
-            _prefs?.setBool(_kShowGyroKey, v);
-          },
-        ),
+        // 4. Graphs to display (per-log chart checklist) + min y-axis floor
+        ..._graphsToDisplaySettings(),
         const Divider(height: 24),
         if (_autoLoggingEnabled)
           ..._autoCaptureSettings()
@@ -1539,44 +1522,13 @@ mixin _BleScreenUi on _BleScreenCore {
           ),
         ),
         const Divider(height: 24),
-        SwitchListTile(
-          contentPadding: EdgeInsets.zero,
-          title: const Text(
-            "Display time in microseconds",
-            style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
-          ),
-          value: _timeMicros,
-          onChanged: (v) {
-            setState(() => _timeMicros = v);
-            _prefs?.setBool(_kTimeMicrosKey, v);
-          },
-        ),
-        if (!_timeMicros) ...[
-          const SizedBox(height: 8),
-          const Text(
-            "Millisecond decimals",
-            style: TextStyle(fontSize: 14, color: Colors.grey),
-          ),
-          const SizedBox(height: 8),
-          Align(
-            alignment: Alignment.centerLeft,
-            child: SegmentedButton<int>(
-              showSelectedIcon: false,
-              segments: const [
-                ButtonSegment(value: 0, label: Text("0")),
-                ButtonSegment(value: 1, label: Text("1")),
-                ButtonSegment(value: 2, label: Text("2")),
-                ButtonSegment(value: 3, label: Text("3")),
-              ],
-              selected: {_timeDecimals},
-              onSelectionChanged: (s) {
-                setState(() => _timeDecimals = s.first);
-                _prefs?.setInt(_kTimeDecimalsKey, s.first);
-              },
-            ),
-          ),
-        ],
+        // 8. Hit detection
+        ..._hitDetectionSettings(),
         const Divider(height: 24),
+        // 9. Swing-speed smoothing (drift removal)
+        ..._swingSmoothingSettings(),
+        const Divider(height: 24),
+        // 10. Storage (always last)
         const Text(
           "Storage",
           style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
@@ -1598,22 +1550,116 @@ mixin _BleScreenUi on _BleScreenCore {
     return "${(kb / 1024).toStringAsFixed(1)} MB";
   }
 
-  List<Widget> _paddleSpeedSettings() {
+  // "Graphs to display" — checklist of which charts each log shows, followed by
+  // the single global minimum y-axis floor for the speed graphs.
+  List<Widget> _graphsToDisplaySettings() {
     return [
       const Text(
+        "Graphs to display",
+        style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+      ),
+      const SizedBox(height: 4),
+      _graphToggle(
+        "Face speed",
+        _showFaceSpeed,
+        _kShowFaceSpeedKey,
+        (v) => _showFaceSpeed = v,
+      ),
+      _graphToggle(
         "Swing speed",
+        _showSwingSpeed,
+        _kShowSwingSpeedKey,
+        (v) => _showSwingSpeed = v,
+      ),
+      _graphToggle(
+        "Face rotation",
+        _showFaceRotation,
+        _kShowFaceRotationKey,
+        (v) => _showFaceRotation = v,
+      ),
+      _graphToggle(
+        "Spin ratio",
+        _showSpinRatio,
+        _kShowSpinRatioKey,
+        (v) => _showSpinRatio = v,
+      ),
+      _graphToggle(
+        "Face angle",
+        _showFaceAngle,
+        _kShowFaceAngleKey,
+        (v) => _showFaceAngle = v,
+      ),
+      _graphToggle(
+        "Raw acceleration",
+        _showAccelGraph,
+        _kShowAccelKey,
+        (v) => _showAccelGraph = v,
+      ),
+      _graphToggle(
+        "Raw gyroscope",
+        _showGyroGraph,
+        _kShowGyroKey,
+        (v) => _showGyroGraph = v,
+      ),
+      const SizedBox(height: 12),
+      const Text(
+        "Minimum graph scale — floors the top of the speed-graph y-axis so a "
+        "slow or still paddle can't autoscale up to look fast. 0 = off.",
+        style: TextStyle(color: Colors.grey),
+      ),
+      _settingSlider(
+        label: "Minimum y-axis scale",
+        value: _minScaleMps,
+        min: 0.0,
+        max: 20.0,
+        divisions: 40, // 0.5 m/s steps
+        unit: "m/s",
+        decimals: 1,
+        onChanged: (v) => setState(() => _minScaleMps = v),
+        onChangeEnd: (v) => _prefs?.setDouble(_kMinScaleKey, v),
+      ),
+    ];
+  }
+
+  // One checklist row (leading checkbox + graph name) in "Graphs to display".
+  Widget _graphToggle(
+    String name,
+    bool value,
+    String prefKey,
+    void Function(bool) apply,
+  ) {
+    return CheckboxListTile(
+      contentPadding: EdgeInsets.zero,
+      dense: true,
+      controlAffinity: ListTileControlAffinity.leading,
+      title: Text(name, style: const TextStyle(fontSize: 15)),
+      value: value,
+      onChanged: (v) {
+        final nv = v ?? false;
+        setState(() => apply(nv));
+        _prefs?.setBool(prefKey, nv);
+      },
+    );
+  }
+
+  // Swing-speed drift-removal (high-pass) window, in plainer language.
+  List<Widget> _swingSmoothingSettings() {
+    return [
+      const Text(
+        "Swing-speed smoothing",
         style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
       ),
       const SizedBox(height: 4),
       const Text(
-        "Swing speed integrates acceleration and high-passes out the slow drift, "
-        "keeping the swing. This window sets the high-pass: shorter reads lower "
-        "(sharp strokes), longer reads higher (slower strokes).",
+        "Swing speed comes from integrating acceleration, which slowly drifts. "
+        "This window sets how much of that drift is removed: a shorter window "
+        "removes more (best for quick, sharp swings), a longer one removes less "
+        "(best for slower, smoother swings).",
         style: TextStyle(color: Colors.grey),
       ),
       const SizedBox(height: 8),
       _settingSlider(
-        label: "Drift-removal window",
+        label: "Smoothing window",
         value: _swingHpSec,
         min: 0.2,
         max: 0.7,
@@ -1625,24 +1671,6 @@ mixin _BleScreenUi on _BleScreenCore {
           _prefs?.setDouble(_kSwingHpKey, v);
           setState(() => _speedCache.clear()); // recompute logs at new window
         },
-      ),
-      const SizedBox(height: 8),
-      const Text(
-        "Minimum graph scale — floors the top of the speed-graph y-axis so a "
-        "slow or still paddle can't autoscale up to look fast. 0 = off.",
-        style: TextStyle(color: Colors.grey),
-      ),
-      const SizedBox(height: 8),
-      _settingSlider(
-        label: "Minimum y-axis scale",
-        value: _minScaleMps,
-        min: 0.0,
-        max: 20.0,
-        divisions: 40, // 0.5 m/s steps
-        unit: "m/s",
-        decimals: 1,
-        onChanged: (v) => setState(() => _minScaleMps = v),
-        onChangeEnd: (v) => _prefs?.setDouble(_kMinScaleKey, v),
       ),
     ];
   }

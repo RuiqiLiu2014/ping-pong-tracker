@@ -20,7 +20,7 @@ part 'ble_screen_core.dart';
 part 'ble_screen_ui.dart';
 
 // App version, shown top-right. Bump on app changes (1.0, 1.1, ...).
-const String kAppVersion = "1.5";
+const String kAppVersion = "1.6";
 
 // Shared constants (top-level so both part-file mixins can see them).
 const double _batteryAlpha = 0.02; // EMA weight (~0.6 s at ~80 pkt/s)
@@ -37,6 +37,12 @@ const String _kSwingHpKey = "swingHpSec";
 const String _kMinScaleKey = "minScaleMps";
 const String _kShowAccelKey = "showAccelGraph";
 const String _kShowGyroKey = "showGyroGraph";
+// Per-graph "graphs to display" checklist toggles (all default on).
+const String _kShowFaceSpeedKey = "showFaceSpeed";
+const String _kShowSwingSpeedKey = "showSwingSpeed";
+const String _kShowFaceRotationKey = "showFaceRotation";
+const String _kShowSpinRatioKey = "showSpinRatio";
+const String _kShowFaceAngleKey = "showFaceAngle";
 const String _kThemeModeKey = "themeMode";
 const String _kAppThemeKey = "appTheme";
 const String _kColorSwapKey = "colorSwap";
@@ -46,8 +52,6 @@ const String _kResetLogsKey = "resetLogsOnLeave";
 const double kLeverArmM = 0.185;
 const String _kHoverPersistKey = "hoverPersists";
 const String _kHoverPosKey = "hoverReadoutPos";
-const String _kTimeMicrosKey = "timeMicros";
-const String _kTimeDecimalsKey = "timeDecimals";
 const String _kFaceNormXKey = "faceNormalX";
 const String _kFaceNormYKey = "faceNormalY";
 const String _kFaceNormZKey = "faceNormalZ";
