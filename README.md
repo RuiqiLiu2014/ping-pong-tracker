@@ -127,7 +127,7 @@ shift if you recalibrate later.
 | 100 mAh LiPo Battery Pack | rechargeable battery pack to power the microcontroller | https://www.amazon.com/dp/B083NWXLTK |
 | 1P2T Mini Slide Switch | switch to turn the unit on and off | https://www.amazon.com/dp/B01N25FBWD |
 
-**3D-printed mount (optional):** STL files for the case and lid are in [`stls/`](stls/) (`case.stl`, `lid.stl`). The printed mount is optional — it houses the board and battery and attaches to the base of the handle, but you can also secure the electronics directly to the paddle with tape or velcro.
+**3D-printed mount (optional):** STL files for the case and lid are in [`stls/`](stls/) (`case.stl`, `lid.stl`). The printed mount is optional — it houses the board and battery and attaches to the base of the handle, but you can also secure the electronics with electrical tape.
 
 ---
 
