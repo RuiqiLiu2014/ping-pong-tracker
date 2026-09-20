@@ -124,10 +124,12 @@ shift if you recalibrate later.
 ---
 
 ## Assembly
-
-<!-- TODO: how to build the unit from the parts above — e.g. soldering the
-     battery + switch to the XIAO, seating everything in the printed case, and
-     mounting it on the paddle. (Getting started below assumes an assembled unit.) -->
+Watch the video below for assembly instructions, then move on to **Getting Started**.
+<p align="center">
+  <a href="https://youtu.be/WwMqLt4rDPo">
+    <img src="docs/img/assembly_thumbnail.png" width="640" alt="Ping Pong Tracker Assembly Instructions — click to watch">
+  </a>
+</p>
 
 ---
 
