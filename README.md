@@ -117,7 +117,7 @@ shift if you recalibrate later.
 ## Hardware
 
 <!-- Photos of the assembled device + mount — physical build is a differentiator. -->
-![ hardware photo goes here ]()
+![Hardware 1](docs/img/hardware1.png) ![Hardware 2](docs/img/hardware2.png)
 
 **Parts list**
 
