@@ -33,9 +33,9 @@ There are sports trackers out there for racket sports, but they tend to be expen
 ## Screenshots
 
 <!-- 2-4 app screenshots. A table keeps them aligned. -->
-| [ caption goes here ] | [ caption goes here ] |
-|---|---|
-| ![ screenshot goes here ]() | ![ screenshot goes here ]() |
+| Connection screen | Calibration wizard | Logs list | Log graphs | More log graphs | Settings | More settings |
+|---|---|---|---|---|---|---|
+| ![Connection screen](docs/img/connection.png) | ![Calibration wizard](docs/img/calibration.png) | ![Logs list](docs/img/logs.png) | ![Log graphs](docs/img/log1.png) | ![More log graphs](docs/img/log2.png) | ![Settings](docs/img/settings1.png) | ![More settings](docs/img/settings2.png) |
 
 ---
 
