@@ -25,7 +25,7 @@ mixin _BleScreenUi on _BleScreenCore {
       },
       child: Scaffold(
         appBar: AppBar(
-          title: const Text('Paddle Prototype Bench'),
+          title: const Text('Ping Pong Tracker'),
           // Colours come from appBarTheme, so the bar follows the chosen theme
           // (bright blue for Blue; adaptive grey for Gray).
           actions: [
@@ -1436,6 +1436,10 @@ mixin _BleScreenUi on _BleScreenCore {
           ],
         ),
         const Divider(height: 24),
+        // Graphs to display (per-log chart checklist) + min y-axis floor
+        ..._graphsToDisplaySettings(),
+        const Divider(height: 24),
+        // Automatic logging — sits just above its capture-window setting.
         SwitchListTile(
           contentPadding: EdgeInsets.zero,
           title: const Text(
@@ -1446,9 +1450,6 @@ mixin _BleScreenUi on _BleScreenCore {
           value: _autoLoggingEnabled,
           onChanged: _setAutoLogging,
         ),
-        const Divider(height: 24),
-        // 4. Graphs to display (per-log chart checklist) + min y-axis floor
-        ..._graphsToDisplaySettings(),
         const Divider(height: 24),
         if (_autoLoggingEnabled)
           ..._autoCaptureSettings()
