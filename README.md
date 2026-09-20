@@ -113,7 +113,7 @@ shift if you recalibrate later.
 
 ## Hardware
 
-| ![Hardware 1](docs/img/hardware1.png) | ![Hardware 2](docs/img/hardware2.png) |
+![Hardware 1](docs/img/hardware1.png) ![Hardware 2](docs/img/hardware2.png) ![Hardware 3](docs/img/hardware3.png)
 
 **Parts list**
 
