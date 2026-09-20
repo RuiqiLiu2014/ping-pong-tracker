@@ -1,15 +1,12 @@
 # Ping Pong Tracker
 
-> An advanced ping pong paddle motion tracker, attached to the base of the handle, that sends 6-axis IMU data to a phone app at 1660 Hz via BLE. The phone app saves and displays the data in a readable format, analyzing hit time, paddle speed, spin ratio, and more for every shot, allowing users to easily analyze their shot quality and find shortcomings in their swings.
+> A ping pong paddle motion tracker, attached to the base of the handle, that sends 6-axis IMU data to a phone app at 1660 Hz via BLE. The phone app saves and displays the data in a readable format, analyzing hit time, paddle speed, spin ratio, and more for every shot, allowing users to easily analyze their shot quality and find shortcomings in their swings.
 
 ---
 
 ## Demo
 
-<!-- Lead with an autoplaying GIF (plays inline, no click needed). Keep it 5-10s. -->
-![ demo GIF goes here ]( path/to/demo.gif )
-
-**Full demo video:** [ YouTube link goes here ]
+[ YouTube link goes here ]
 
 ---
 
@@ -62,7 +59,7 @@ flowchart TD
   FW -->|"BLE notify — Nordic UART<br/>~1.66 kHz, batched, MTU 247"| PARSE
   subgraph PHONE["Phone app — Flutter"]
     PARSE["Parse packets<br/>rebuild µs timeline from sample index<br/>· flag dropped samples"]
-    LIVE["Live readouts<br/>orientation + ω×r face speed"]
+    LIVE["Live readouts<br/>orientation + face rotation"]
     HIT["Hit detection<br/>2-pole ~120 Hz high-pass + envelope"]
     CAP["Auto-capture<br/>ring buffer → one log per hit (±window)"]
     ANALYZE["Per-log analysis<br/>• swing speed: ∫accel + high-pass detrend<br/>• face speed: ω×r drift-free → ⟂/∥ split → spin ratio<br/>• face angle vs vertical"]
@@ -116,8 +113,7 @@ shift if you recalibrate later.
 
 ## Hardware
 
-<!-- Photos of the assembled device + mount — physical build is a differentiator. -->
-![Hardware 1](docs/img/hardware1.png) ![Hardware 2](docs/img/hardware2.png)
+| ![Hardware 1](docs/img/hardware1.png) | ![Hardware 2](docs/img/hardware2.png) |
 
 **Parts list**
 
@@ -183,12 +179,13 @@ Watch the video below for assembly instructions, then move on to **Getting Start
 
 - app: contains the flutter app
 - calibration_drawings: contains SVG files for calibration wizard images
+- docs/img: contains images used in this README
 - firmware: contains firmware deployed to the board for data collection
 - stls: contains STL files for 3D printed case
 
 ---
 
-## Future Steps
+## Future steps
 
 - Implement a TinyML model to classify swings, allowing for grouping logs in the app based on swing type and better analysis among swings. Allows for focused improvement of certain swings.
 - Improved metrics and in-app analysis of multiple logs.
