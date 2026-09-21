@@ -259,7 +259,14 @@ mixin _BleScreenUi on _BleScreenCore {
             "Orientation (relative to down)",
             style: TextStyle(fontWeight: FontWeight.bold),
           ),
-          Text(orientationText, style: const TextStyle(fontSize: 18)),
+          Text(
+            orientationText,
+            style: TextStyle(
+              fontSize: 18,
+              // Bright orange when uncalibrated, to nudge calibration.
+              color: (!m.calibrated && !m.calibrating) ? Colors.orange : null,
+            ),
+          ),
           if (m.calibrated)
             Text(
               "Tilt from vertical: ${m.tilt.toStringAsFixed(0)}°",
@@ -990,11 +997,11 @@ mixin _BleScreenUi on _BleScreenCore {
           // 4. Spin ratio — brushing fraction of that rotation.
           if (_showSpinRatio)
             _chartSection(
-              "Spin ratio",
+              "Brushing %",
               log,
               [spin!],
               const [Colors.purple],
-              const ["spin ratio"],
+              const ["brushing %"],
               forcedMin: 0,
               forcedMax: 100,
               cornerText: hitSpin == null
@@ -1003,7 +1010,8 @@ mixin _BleScreenUi on _BleScreenCore {
                         "at hit: ${hitSpin.toStringAsFixed(0)}%",
               unit: "%",
               decimals: 0,
-              info: "Percentage of speed that contributes to spin.",
+              info:
+                  "Percentage of the paddle's motion that contributes to spin.",
             ),
           // 5. Face angle — paddle-face tilt vs vertical through the swing.
           if (_showFaceAngle)
@@ -1615,7 +1623,7 @@ mixin _BleScreenUi on _BleScreenCore {
         (v) => _showFaceRotation = v,
       ),
       _graphToggle(
-        "Spin ratio",
+        "Brushing %",
         _showSpinRatio,
         _kShowSpinRatioKey,
         (v) => _showSpinRatio = v,

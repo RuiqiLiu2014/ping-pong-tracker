@@ -768,14 +768,12 @@ mixin _BleScreenCore
       _isConnecting = false;
     });
     _charSubscription = char.onValueReceived.listen(_onPacket);
-    // Enforce calibration on every connect — many metrics (splits, spin ratio,
-    // face angle, true speeds) depend on it. Open the wizard (as a hard gate:
-    // no X) as soon as streaming starts, after the frame so the Connection tab
-    // is mounted first.
+    // Reminder to calibrate on every connect — many metrics (splits, brushing %,
+    // face angle, true speeds) depend on it. Open the wizard as soon as we're
+    // connected (even if charging, in which case it's just a skippable reminder),
+    // after the frame so the Connection tab is mounted first.
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (mounted && _connectionStatus == "Streaming Data") {
-        _openCalibration(dismissable: false);
-      }
+      if (mounted && _connectionStatus != "Disconnected") _openCalibration();
     });
   }
 
@@ -816,6 +814,12 @@ mixin _BleScreenCore
         : (battByte & 0x7F).toDouble();
 
     if (isStatus) {
+      // Plugged in (no IMU stream): calibration can't run, so auto-close the
+      // wizard if it's open — the user likely just wants the battery %.
+      if (_calRouteOpen && mounted) {
+        _calRouteOpen = false;
+        Navigator.of(context).pop();
+      }
       if (chargingLed) {
         // Charging (or charge-complete): the rise is real, so lift the never-rise
         // clamp and track the % up. Show the green "Charging" state.
@@ -1068,13 +1072,13 @@ mixin _BleScreenCore
     });
   }
 
-  // Open the full-screen two-step calibration wizard (face-up, then tip-up).
-  // [dismissable] false = hard gate (opened on connect): no X, system back
-  // blocked, so the user must complete calibration. _calRouteOpen lets the
-  // connection teardown close it if the paddle drops mid-calibration.
+  // Open the full-screen two-step calibration wizard (face-up, then tip-up). It
+  // opens automatically on connect as a reminder but is always skippable (✕).
+  // canCalibrate is read live by the wizard, so the Calibrate button disables
+  // while charging (no IMU stream). _calRouteOpen lets the connection teardown
+  // close it if the paddle drops while it's open.
   bool _calRouteOpen = false;
-  void _openCalibration({bool dismissable = true}) {
-    final streaming = _connectionStatus == "Streaming Data";
+  void _openCalibration() {
     _calRouteOpen = true;
     Navigator.of(context)
         .push(
@@ -1082,8 +1086,7 @@ mixin _BleScreenCore
             fullscreenDialog: true,
             builder: (_) => CalibrationWizard(
               motion: _motion,
-              canCalibrate: streaming,
-              dismissable: dismissable,
+              canCalibrate: () => _connectionStatus == "Streaming Data",
             ),
           ),
         )

@@ -12,21 +12,20 @@ import '../motion_estimator.dart';
 ///
 /// It drives the shared [MotionEstimator] directly (start each pose capture and
 /// poll its progress); the app's existing onCalibrated / onLeverCalibrated
-/// callbacks still fire to persist each result.
+/// callbacks still fire to persist each result. It opens automatically on every
+/// connect as a reminder, but is always skippable (the ✕ or system back).
 ///
-/// When [dismissable] is false (opened automatically on connect) it's a hard
-/// gate: no close button and the system back is blocked, so the user must
-/// complete both poses. Whatever each pose captures is accepted as-is — there
-/// is no "pose looks off" review.
+/// [canCalibrate] is read live each tick: calibration needs the live IMU stream,
+/// so it's false while the paddle is charging (plugged in) or disconnected — the
+/// Calibrate button then disables and the user can skip. Poses are accepted
+/// exactly as captured (no "pose looks off" review).
 class CalibrationWizard extends StatefulWidget {
   final MotionEstimator motion;
-  final bool canCalibrate; // false when the paddle isn't streaming
-  final bool dismissable; // false = hard gate (no X, system back blocked)
+  final bool Function() canCalibrate; // live: can calibration run right now?
   const CalibrationWizard({
     super.key,
     required this.motion,
-    this.canCalibrate = true,
-    this.dismissable = true,
+    required this.canCalibrate,
   });
 
   @override
@@ -44,7 +43,8 @@ class _CalibrationWizardState extends State<CalibrationWizard> {
   void initState() {
     super.initState();
     // Poll the estimator so the progress bar tracks the capture and we can
-    // advance when each step finishes (progress is fed by the BLE stream).
+    // advance when each step finishes (progress is fed by the BLE stream). The
+    // rebuild also re-reads canCalibrate() so the button tracks charging state.
     _poll = Timer.periodic(const Duration(milliseconds: 60), (_) => _tick());
   }
 
@@ -72,10 +72,8 @@ class _CalibrationWizardState extends State<CalibrationWizard> {
     });
     if (_step == _Step.done && !_closeScheduled) {
       _closeScheduled = true;
-      // pop() (not maybePop) so the auto-close still works under a blocked
-      // PopScope in hard-gate mode.
       Timer(const Duration(milliseconds: 1200), () {
-        if (mounted) Navigator.of(context).pop();
+        if (mounted) Navigator.of(context).maybePop();
       });
     }
   }
@@ -130,132 +128,122 @@ class _CalibrationWizardState extends State<CalibrationWizard> {
   @override
   Widget build(BuildContext context) {
     final bool done = _step == _Step.done;
+    final bool canCalibrate = widget.canCalibrate();
     // Neutral black/white for the button text instead of the theme accent.
     final btnText = Theme.of(context).brightness == Brightness.dark
         ? Colors.white
         : Colors.black;
-    return PopScope(
-      // Hard gate when opened on connect: block the system back button too.
-      canPop: widget.dismissable,
-      child: Scaffold(
-        body: SafeArea(
-          child: Column(
-            children: [
-              // Close button only when dismissable; keep the spacing otherwise.
-              if (widget.dismissable)
-                Align(
-                  alignment: Alignment.topRight,
-                  child: IconButton(
-                    tooltip: "Close",
-                    icon: const Icon(Icons.close),
-                    onPressed: _close,
-                  ),
-                )
-              else
-                const SizedBox(height: 48),
-              // Centre stage — a placeholder for the demo video/image to come.
-              Expanded(
-                child: Center(
-                  child: Padding(
-                    padding: const EdgeInsets.symmetric(horizontal: 32),
-                    child: Column(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        if (done)
-                          const Padding(
-                            padding: EdgeInsets.only(bottom: 16),
-                            child: Icon(
-                              Icons.check_circle,
-                              size: 64,
-                              color: Colors.green,
-                            ),
-                          )
-                        else
-                          Padding(
-                            padding: const EdgeInsets.only(bottom: 44),
-                            child: SvgPicture.asset(
-                              _stepAsset,
-                              height: 270,
-                              fit: BoxFit.contain,
-                              colorFilter: ColorFilter.mode(
-                                Theme.of(context).colorScheme.onSurface,
-                                BlendMode.srcIn,
-                              ),
-                            ),
+    return Scaffold(
+      body: SafeArea(
+        child: Column(
+          children: [
+            // Always skippable — a reminder, not a hard gate.
+            Align(
+              alignment: Alignment.topRight,
+              child: IconButton(
+                tooltip: "Close",
+                icon: const Icon(Icons.close),
+                onPressed: _close,
+              ),
+            ),
+            // Centre stage — a placeholder for the demo video/image to come.
+            Expanded(
+              child: Center(
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 32),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      if (done)
+                        const Padding(
+                          padding: EdgeInsets.only(bottom: 16),
+                          child: Icon(
+                            Icons.check_circle,
+                            size: 64,
+                            color: Colors.green,
                           ),
-                        Text(
-                          _centerText,
-                          textAlign: TextAlign.center,
-                          style: const TextStyle(
-                            fontSize: 26,
-                            fontWeight: FontWeight.w600,
+                        )
+                      else
+                        Padding(
+                          padding: const EdgeInsets.only(bottom: 44),
+                          child: SvgPicture.asset(
+                            _stepAsset,
+                            height: 270,
+                            fit: BoxFit.contain,
+                            colorFilter: ColorFilter.mode(
+                              Theme.of(context).colorScheme.onSurface,
+                              BlendMode.srcIn,
+                            ),
                           ),
                         ),
-                        if (_stepNumber == 1)
-                          const Padding(
-                            padding: EdgeInsets.only(top: 12),
-                            child: Text(
-                              "Keep the handle hanging off the edge as it is "
-                              "thicker than the face",
-                              textAlign: TextAlign.center,
-                              style: TextStyle(
-                                fontSize: 13,
-                                color: Colors.grey,
-                              ),
-                            ),
-                          ),
-                      ],
-                    ),
-                  ),
-                ),
-              ),
-              // Bottom controls.
-              Padding(
-                padding: const EdgeInsets.fromLTRB(24, 8, 24, 32),
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    if (!done)
                       Text(
-                        widget.canCalibrate
-                            ? "Step $_stepNumber of 2"
-                            : "Connect the paddle to calibrate",
-                        style: TextStyle(
-                          color: widget.canCalibrate
-                              ? Colors.grey
-                              : Colors.orange,
+                        _centerText,
+                        textAlign: TextAlign.center,
+                        style: const TextStyle(
+                          fontSize: 26,
+                          fontWeight: FontWeight.w600,
                         ),
                       ),
-                    const SizedBox(height: 10),
-                    // Reserve space so the layout doesn't jump when the bar shows.
-                    SizedBox(
-                      height: 6,
-                      child: _running
-                          ? LinearProgressIndicator(value: _progress)
-                          : null,
-                    ),
-                    const SizedBox(height: 16),
-                    SizedBox(
-                      width: double.infinity,
-                      child: ElevatedButton(
-                        onPressed: (_running || done || !widget.canCalibrate)
-                            ? null
-                            : _onCalibrate,
-                        style: ElevatedButton.styleFrom(
-                          foregroundColor: btnText,
-                          padding: const EdgeInsets.symmetric(vertical: 16),
+                      if (_stepNumber == 1)
+                        const Padding(
+                          padding: EdgeInsets.only(top: 12),
+                          child: Text(
+                            "Keep the handle hanging off the edge as it is "
+                            "thicker than the face",
+                            textAlign: TextAlign.center,
+                            style: TextStyle(fontSize: 13, color: Colors.grey),
+                          ),
                         ),
-                        child: Text(
-                          _running ? "Calibrating…" : "Calibrate",
-                          style: const TextStyle(fontSize: 18),
-                        ),
-                      ),
-                    ),
-                  ],
+                    ],
+                  ),
                 ),
               ),
-            ],
-          ),
+            ),
+            // Bottom controls.
+            Padding(
+              padding: const EdgeInsets.fromLTRB(24, 8, 24, 32),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  if (!done)
+                    Text(
+                      canCalibrate
+                          ? "Step $_stepNumber of 2"
+                          : "Charging — unplug to calibrate, or skip for now",
+                      textAlign: TextAlign.center,
+                      style: TextStyle(
+                        color: canCalibrate ? Colors.grey : Colors.orange,
+                      ),
+                    ),
+                  const SizedBox(height: 10),
+                  // Reserve space so the layout doesn't jump when the bar shows.
+                  SizedBox(
+                    height: 6,
+                    child: _running
+                        ? LinearProgressIndicator(value: _progress)
+                        : null,
+                  ),
+                  const SizedBox(height: 16),
+                  SizedBox(
+                    width: double.infinity,
+                    child: ElevatedButton(
+                      onPressed: (_running || done || !canCalibrate)
+                          ? null
+                          : _onCalibrate,
+                      style: ElevatedButton.styleFrom(
+                        foregroundColor: btnText,
+                        padding: const EdgeInsets.symmetric(vertical: 16),
+                      ),
+                      child: Text(
+                        _running ? "Calibrating…" : "Calibrate",
+                        style: const TextStyle(fontSize: 18),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
         ),
       ),
     );
