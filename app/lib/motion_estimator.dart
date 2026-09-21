@@ -62,6 +62,12 @@ class MotionEstimator {
   final List<double> _faceVelBody = [0, 0, 0];
   final List<double> _faceVelWorld = [0, 0, 0];
   List<double> get faceVelWorld => _faceVelWorld;
+
+  // Paddle-face normal rotated into the world frame (unit). Lets the world-frame
+  // hand / overall-paddle velocities be split into closing (⟂ to face) and
+  // brushing (∥ to face) components. Only meaningful once a face normal exists.
+  final List<double> _faceNormalWorld = [0, 0, 1];
+  List<double> get faceNormalWorld => _faceNormalWorld;
   // World "up" expressed in the body frame (unit), refreshed each update(). Lets
   // callers read the paddle's tilt relative to gravity without tracking yaw.
   final List<double> _upBody = [0, 0, 1];
@@ -338,6 +344,14 @@ class MotionEstimator {
         r10 * _faceVelBody[0] + r11 * _faceVelBody[1] + r12 * _faceVelBody[2];
     _faceVelWorld[2] =
         r20 * _faceVelBody[0] + r21 * _faceVelBody[1] + r22 * _faceVelBody[2];
+    // Rotate the (body-frame) face normal into world too, for the ⟂/∥ split of
+    // the translational (hand) and overall-paddle velocities.
+    final fn = _faceNormal;
+    if (fn != null) {
+      _faceNormalWorld[0] = r00 * fn[0] + r01 * fn[1] + r02 * fn[2];
+      _faceNormalWorld[1] = r10 * fn[0] + r11 * fn[1] + r12 * fn[2];
+      _faceNormalWorld[2] = r20 * fn[0] + r21 * fn[1] + r22 * fn[2];
+    }
     _vel[0] += fwx * _dt;
     _vel[1] += fwy * _dt;
     _vel[2] += (fwz - _g) * _dt;
@@ -427,9 +441,19 @@ class SpeedSeries {
   // the slow drift ramp, leaving the transient swing. This is the good one.
   final Float32List swingSpeed;
   final double maxSwingSpeed;
+  // Hand speed split by the face normal (only when hasComponents).
+  final Float32List swingPerp; // closing (⟂ to face), m/s
+  final double maxSwingPerp;
+  final Float32List swingPar; // brushing (∥ to face), m/s
+  final double maxSwingPar;
   // True face speed: |v_sensor + omega x r| — swing translation plus rotation.
   final Float32List trueFaceSpeed;
   final double maxTrueFaceSpeed;
+  // Overall paddle speed split by the face normal (only when hasComponents).
+  final Float32List trueFacePerp; // closing (⟂ to face), m/s
+  final double maxTrueFacePerp;
+  final Float32List trueFacePar; // brushing (∥ to face), m/s
+  final double maxTrueFacePar;
   final Float32List faceSpeed; // |omega x r| per sample, m/s (drift-free)
   final double maxFaceSpeed;
   final Float32List facePerp; // closing (perpendicular to face), m/s
@@ -459,6 +483,15 @@ class SpeedSeries {
     this.faceAngleMin,
     this.faceAngleMax,
     this.hasComponents,
+    // Appended (kept last so the earlier positional args stay put).
+    this.swingPerp,
+    this.maxSwingPerp,
+    this.swingPar,
+    this.maxSwingPar,
+    this.trueFacePerp,
+    this.maxTrueFacePerp,
+    this.trueFacePar,
+    this.maxTrueFacePar,
   );
 }
 
@@ -471,13 +504,18 @@ SpeedSeries computeSpeedSeries(
   List<Float32List> axes,
   int count, {
   double leverArmM = 0.185,
+  double handLeverM = 0.095, // sensor (handle base) -> hand grip, ~9.5 cm
   double swingHpSec = 0.35,
   List<double>? faceNormal,
   List<double>? leverDir,
 }) {
   final speed = Float32List(count);
   final swingSpeed = Float32List(count);
+  final swingPerp = Float32List(count);
+  final swingPar = Float32List(count);
   final trueFaceSpeed = Float32List(count);
+  final trueFacePerp = Float32List(count);
+  final trueFacePar = Float32List(count);
   final faceSpeed = Float32List(count);
   final facePerp = Float32List(count);
   final facePar = Float32List(count);
@@ -501,6 +539,14 @@ SpeedSeries computeSpeedSeries(
       0,
       0,
       hasComp,
+      swingPerp,
+      0,
+      swingPar,
+      0,
+      trueFacePerp,
+      0,
+      trueFacePar,
+      0,
     );
   }
 
@@ -543,6 +589,10 @@ SpeedSeries computeSpeedSeries(
   final fvx = Float64List(count);
   final fvy = Float64List(count);
   final fvz = Float64List(count);
+  // World-frame face normal per sample, for the closing/brushing split.
+  final nwx = Float64List(count);
+  final nwy = Float64List(count);
+  final nwz = Float64List(count);
 
   double maxS = 0, maxF = 0, maxP = 0, maxA = 0;
   double angMin = 0, angMax = 0;
@@ -572,6 +622,10 @@ SpeedSeries computeSpeedSeries(
     fvx[i] = fv[0];
     fvy[i] = fv[1];
     fvz[i] = fv[2];
+    final nw = m.faceNormalWorld;
+    nwx[i] = nw[0];
+    nwy[i] = nw[1];
+    nwz[i] = nw[2];
     faceSpeed[i] = m.faceSpeed;
     facePerp[i] = m.faceSpeedPerp;
     facePar[i] = m.faceSpeedPar;
@@ -603,7 +657,10 @@ SpeedSeries computeSpeedSeries(
     pz[i + 1] = pz[i] + vz[i];
   }
   final int hw = (swingHpSec / dt).round().clamp(1, count);
+  final double handScale =
+      handLeverM / leverArmM; // omega x r is linear in lever
   double maxSw = 0, maxTf = 0;
+  double maxSwP = 0, maxSwA = 0, maxTfP = 0, maxTfA = 0;
   for (int i = 0; i < count; i++) {
     final int lo = i - hw < 0 ? 0 : i - hw;
     final int hi = i + hw + 1 > count ? count : i + hw + 1;
@@ -611,16 +668,39 @@ SpeedSeries computeSpeedSeries(
     final double dvx = vx[i] - (px[hi] - px[lo]) / cnt;
     final double dvy = vy[i] - (py[hi] - py[lo]) / cnt;
     final double dvz = vz[i] - (pz[hi] - pz[lo]) / cnt;
-    final double s = math.sqrt(dvx * dvx + dvy * dvy + dvz * dvz);
-    swingSpeed[i] = s;
-    if (s > maxSw) maxSw = s;
-    // True face speed: swing translation + rotation, both in world frame.
+    // Hand speed: sensor translation + rotation at the hand lever. omega x r is
+    // linear in lever length, so the hand's rotational velocity is the face's
+    // scaled by handLever / faceLever.
+    final double hx = dvx + fvx[i] * handScale;
+    final double hy = dvy + fvy[i] * handScale;
+    final double hz = dvz + fvz[i] * handScale;
+    final double hs = math.sqrt(hx * hx + hy * hy + hz * hz);
+    swingSpeed[i] = hs;
+    if (hs > maxSw) maxSw = hs;
+    // Overall paddle speed: sensor translation + rotation at the face lever.
     final double tx = dvx + fvx[i];
     final double ty = dvy + fvy[i];
     final double tz = dvz + fvz[i];
     final double tf = math.sqrt(tx * tx + ty * ty + tz * tz);
     trueFaceSpeed[i] = tf;
     if (tf > maxTf) maxTf = tf;
+    // Split each world velocity into closing (⟂, along the face normal) and
+    // brushing (∥, in the face plane): perp = |v·n̂|, par = √(|v|² − perp²).
+    if (hasComp) {
+      final double nx = nwx[i], ny = nwy[i], nz = nwz[i];
+      final double hp = (hx * nx + hy * ny + hz * nz).abs();
+      final double hpar = math.sqrt(math.max(0.0, hs * hs - hp * hp));
+      swingPerp[i] = hp;
+      swingPar[i] = hpar;
+      if (hp > maxSwP) maxSwP = hp;
+      if (hpar > maxSwA) maxSwA = hpar;
+      final double tp = (tx * nx + ty * ny + tz * nz).abs();
+      final double tpar = math.sqrt(math.max(0.0, tf * tf - tp * tp));
+      trueFacePerp[i] = tp;
+      trueFacePar[i] = tpar;
+      if (tp > maxTfP) maxTfP = tp;
+      if (tpar > maxTfA) maxTfA = tpar;
+    }
   }
 
   return SpeedSeries(
@@ -640,5 +720,13 @@ SpeedSeries computeSpeedSeries(
     angMin,
     angMax,
     hasComp,
+    swingPerp,
+    maxSwP,
+    swingPar,
+    maxSwA,
+    trueFacePerp,
+    maxTfP,
+    trueFacePar,
+    maxTfA,
   );
 }

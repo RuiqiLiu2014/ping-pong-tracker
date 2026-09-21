@@ -267,7 +267,7 @@ mixin _BleScreenUi on _BleScreenCore {
             ),
           const SizedBox(height: 16),
           const Text(
-            "Face rotation",
+            "Paddle rotation",
             style: TextStyle(fontWeight: FontWeight.bold),
           ),
           Text(
@@ -841,21 +841,23 @@ mixin _BleScreenUi on _BleScreenCore {
   }
 
   Widget _logCharts(SavedLog log, SpeedSeries ss) {
-    // Spin index = brushing fraction of the face motion (∥ ÷ total ω×r) as a
-    // percentage: how grazing the contact is (0% = flat drive, 100% = pure
-    // brush). Gated to 0 while the paddle is slow so a still paddle reads 0.
+    // Spin ratio = brushing fraction of the whole paddle-face motion
+    // (∥ ÷ total overall paddle speed) as a percentage: how grazing the contact
+    // is (0% = flat drive, 100% = pure brush). Uses the overall paddle speed
+    // (translation + rotation), not rotation alone, so translational brushing
+    // counts too. Gated to 0 while the paddle is slow so a still paddle reads 0.
     Float32List? spin;
     double peakSpin = 0; // spin % at the fastest instant
     double? hitSpin; // spin % at the first ball hit, if the log has one
     if (ss.hasComponents) {
       const double gate =
-          0.5; // m/s of face speed below which spin is unreliable
+          0.5; // m/s of paddle speed below which spin is unreliable
       spin = Float32List(log.count);
       double fastest = 0;
       for (int i = 0; i < log.count; i++) {
-        final double f = ss.faceSpeed[i];
+        final double f = ss.trueFaceSpeed[i];
         final double s = f > gate
-            ? 100.0 * math.min(1.0, ss.facePar[i] / f)
+            ? 100.0 * math.min(1.0, ss.trueFacePar[i] / f)
             : 0.0;
         spin[i] = s;
         if (f > fastest) {
@@ -899,42 +901,86 @@ mixin _BleScreenUi on _BleScreenCore {
               ],
             ),
           ),
-        // 1. True face speed = swing translation + ω×r rotation (headline).
+        // 1. Overall paddle speed = hand translation + ω×r rotation at the face
+        // (headline). Split into closing/brushing once face-up calibrated.
         if (_showFaceSpeed)
-          _chartSection(
-            "Face speed",
-            log,
-            [ss.trueFaceSpeed],
-            const [Colors.indigo],
-            const ["face speed"],
-            forcedMin: 0,
-            minTop: _minScaleMps,
-            cornerText: "max ${ss.maxTrueFaceSpeed.toStringAsFixed(1)} m/s",
-            unit: "m/s",
-            decimals: 2,
-            info: "Speed of the paddle face.",
-          ),
-        // 2. Swing speed (translation only, drift-corrected accel).
+          ss.hasComponents
+              ? _chartSection(
+                  "Overall paddle speed",
+                  log,
+                  [ss.trueFaceSpeed, ss.trueFacePerp, ss.trueFacePar],
+                  const [Colors.indigo, Colors.deepOrange, Colors.teal],
+                  const ["total", "⟂", "∥"],
+                  forcedMin: 0,
+                  minTop: _minScaleMps,
+                  cornerText:
+                      "max ${ss.maxTrueFaceSpeed.toStringAsFixed(1)} · "
+                      "⟂ ${ss.maxTrueFacePerp.toStringAsFixed(1)} · "
+                      "∥ ${ss.maxTrueFacePar.toStringAsFixed(1)} m/s",
+                  unit: "m/s",
+                  decimals: 2,
+                  info:
+                      "Overall speed of the paddle face — your hand's motion "
+                      "plus the paddle's rotation, split into perpendicular and "
+                      "parallel to the face.",
+                )
+              : _chartSection(
+                  "Overall paddle speed",
+                  log,
+                  [ss.trueFaceSpeed],
+                  const [Colors.indigo],
+                  const ["paddle speed"],
+                  forcedMin: 0,
+                  minTop: _minScaleMps,
+                  cornerText:
+                      "max ${ss.maxTrueFaceSpeed.toStringAsFixed(1)} m/s",
+                  unit: "m/s",
+                  decimals: 2,
+                  info:
+                      "Overall speed of the paddle face — your hand's motion "
+                      "plus the paddle's rotation.",
+                ),
+        // 2. Hand speed = drift-corrected translation + ω×r at the hand lever.
+        // Split into closing/brushing once face-up calibrated.
         if (_showSwingSpeed)
-          _chartSection(
-            "Swing speed",
-            log,
-            [ss.swingSpeed],
-            const [Colors.blue],
-            const ["swing speed"],
-            forcedMin: 0,
-            minTop: _minScaleMps,
-            cornerText: "max ${ss.maxSwingSpeed.toStringAsFixed(1)} m/s",
-            unit: "m/s",
-            decimals: 2,
-            info: "Speed of your hand.",
-          ),
+          ss.hasComponents
+              ? _chartSection(
+                  "Hand speed",
+                  log,
+                  [ss.swingSpeed, ss.swingPerp, ss.swingPar],
+                  const [Colors.blue, Colors.deepOrange, Colors.teal],
+                  const ["total", "⟂", "∥"],
+                  forcedMin: 0,
+                  minTop: _minScaleMps,
+                  cornerText:
+                      "max ${ss.maxSwingSpeed.toStringAsFixed(1)} · "
+                      "⟂ ${ss.maxSwingPerp.toStringAsFixed(1)} · "
+                      "∥ ${ss.maxSwingPar.toStringAsFixed(1)} m/s",
+                  unit: "m/s",
+                  decimals: 2,
+                  info:
+                      "Speed of your hand, split into perpendicular and "
+                      "parallel to the face.",
+                )
+              : _chartSection(
+                  "Hand speed",
+                  log,
+                  [ss.swingSpeed],
+                  const [Colors.blue],
+                  const ["hand speed"],
+                  forcedMin: 0,
+                  minTop: _minScaleMps,
+                  cornerText: "max ${ss.maxSwingSpeed.toStringAsFixed(1)} m/s",
+                  unit: "m/s",
+                  decimals: 2,
+                  info: "Speed of your hand.",
+                ),
         // 3. Face rotation (ω×r) — the rotational component, with the
         // closing/brushing split when a face-up calibration exists.
         if (ss.hasComponents) ...[
           if (_showFaceRotation)
             _chartSection(
-              "Face rotation",
+              "Paddle rotation",
               log,
               [ss.faceSpeed, ss.facePerp, ss.facePar],
               const [Colors.indigo, Colors.deepOrange, Colors.teal],
@@ -948,8 +994,8 @@ mixin _BleScreenUi on _BleScreenCore {
               unit: "m/s",
               decimals: 2,
               info:
-                  "Rotation of the face, split into perpendicular and parallel "
-                  "to the face.",
+                  "Rotation of the paddle face, split into perpendicular and "
+                  "parallel to the face.",
             ),
           // 4. Spin ratio — brushing fraction of that rotation.
           if (_showSpinRatio)
@@ -962,8 +1008,8 @@ mixin _BleScreenUi on _BleScreenCore {
               forcedMin: 0,
               forcedMax: 100,
               cornerText: hitSpin == null
-                  ? "at peak ω×r: ${peakSpin.toStringAsFixed(0)}%"
-                  : "at peak ω×r: ${peakSpin.toStringAsFixed(0)}%\n"
+                  ? "at peak speed: ${peakSpin.toStringAsFixed(0)}%"
+                  : "at peak speed: ${peakSpin.toStringAsFixed(0)}%\n"
                         "at hit: ${hitSpin.toStringAsFixed(0)}%",
               unit: "%",
               decimals: 0,
@@ -990,7 +1036,7 @@ mixin _BleScreenUi on _BleScreenCore {
             ),
         ] else if (_showFaceRotation) ...[
           _chartSection(
-            "Face rotation",
+            "Paddle rotation",
             log,
             [ss.faceSpeed],
             const [Colors.indigo],
@@ -1001,13 +1047,13 @@ mixin _BleScreenUi on _BleScreenCore {
             unit: "m/s",
             decimals: 2,
             info:
-                "Rotation of the face, split into perpendicular and parallel "
-                "to the face.",
+                "Rotation of the paddle face, split into perpendicular and "
+                "parallel to the face.",
           ),
           Padding(
             padding: const EdgeInsets.fromLTRB(12, 4, 12, 8),
             child: Text(
-              "Calibrate face-up on the Connection tab to split face rotation "
+              "Calibrate face-up on the Connection tab to split paddle rotation "
               "into closing (⟂ to face) and brushing (∥ to face) components.",
               style: TextStyle(fontSize: 12, color: Colors.grey.shade600),
             ),
@@ -1561,19 +1607,19 @@ mixin _BleScreenUi on _BleScreenCore {
       ),
       const SizedBox(height: 4),
       _graphToggle(
-        "Face speed",
+        "Overall paddle speed",
         _showFaceSpeed,
         _kShowFaceSpeedKey,
         (v) => _showFaceSpeed = v,
       ),
       _graphToggle(
-        "Swing speed",
+        "Hand speed",
         _showSwingSpeed,
         _kShowSwingSpeedKey,
         (v) => _showSwingSpeed = v,
       ),
       _graphToggle(
-        "Face rotation",
+        "Paddle rotation",
         _showFaceRotation,
         _kShowFaceRotationKey,
         (v) => _showFaceRotation = v,
