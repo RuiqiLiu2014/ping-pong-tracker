@@ -142,7 +142,7 @@ Watch the video below for assembly instructions, then move on to **Getting Start
 
 1. **Flash the firmware** — download the latest **`.uf2`** from the [Releases page](https://github.com/RuiqiLiu2014/ping-pong-tracker/releases). Plug the board into your computer with a USB-C data cable and double-tap the reset button to enter bootloader mode (a `XIAO-SENSE` drive appears). Drag the `.uf2` onto that drive; it flashes and reboots automatically.
 2. **Install the app** — choose your platform:
-   1. **Android** — download the latest **`.apk`** from the [Releases page](https://github.com/RuiqiLiu2014/ping-pong-tracker/releases) and open it to install (allow "install from unknown sources" if prompted).
+   1. **Android** — download the latest **`.apk`** from the [Releases page](https://github.com/RuiqiLiu2014/ping-pong-tracker/releases) and open it to install (allow "install from unknown sources" if prompted). To install from source code, download the Flutter SDK and run "flutter run --release" from the app folder.
    2. **iOS** — build from source on a Mac with Xcode: clone this repo, then run `cd app && flutter build ipa`, or open `ios/Runner.xcworkspace`, select your signing team, and run it to your iPhone (requires Xcode + your Apple ID for signing).
 3. **Power on** — mount the board at the base of the paddle handle and flip the switch on; the LED blinks blue while it looks for the app.
 4. **Connect & calibrate** — open the app, tap **Connect to Paddle**, then **Calibrate** and follow the two-pose wizard.
