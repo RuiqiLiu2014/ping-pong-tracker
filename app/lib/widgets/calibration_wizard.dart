@@ -13,28 +13,27 @@ import '../motion_estimator.dart';
 /// It drives the shared [MotionEstimator] directly (start each pose capture and
 /// poll its progress); the app's existing onCalibrated / onLeverCalibrated
 /// callbacks still fire to persist each result.
+///
+/// When [dismissable] is false (opened automatically on connect) it's a hard
+/// gate: no close button and the system back is blocked, so the user must
+/// complete both poses. Whatever each pose captures is accepted as-is — there
+/// is no "pose looks off" review.
 class CalibrationWizard extends StatefulWidget {
   final MotionEstimator motion;
   final bool canCalibrate; // false when the paddle isn't streaming
+  final bool dismissable; // false = hard gate (no X, system back blocked)
   const CalibrationWizard({
     super.key,
     required this.motion,
     this.canCalibrate = true,
+    this.dismissable = true,
   });
 
   @override
   State<CalibrationWizard> createState() => _CalibrationWizardState();
 }
 
-enum _Step {
-  faceUp,
-  faceUpRunning,
-  faceUpReview,
-  lever,
-  leverRunning,
-  leverReview,
-  done,
-}
+enum _Step { faceUp, faceUpRunning, lever, leverRunning, done }
 
 class _CalibrationWizardState extends State<CalibrationWizard> {
   _Step _step = _Step.faceUp;
@@ -62,23 +61,21 @@ class _CalibrationWizardState extends State<CalibrationWizard> {
   void _tick() {
     if (!mounted) return;
     setState(() {
+      // Each pose is accepted exactly as captured (no validity review):
+      // face-up -> lever, then lever -> done.
       if (_step == _Step.faceUpRunning && !widget.motion.calibrating) {
-        // Face-up finished. If the pose looks off, pause on a review step so the
-        // user can recalibrate or continue; otherwise go straight to the lever.
-        _step = (widget.motion.hasFaceNormal && !widget.motion.faceNormalValid)
-            ? _Step.faceUpReview
-            : _Step.lever;
+        _step = _Step.lever;
       } else if (_step == _Step.leverRunning &&
           !widget.motion.calibratingLever) {
-        // Vertical finished. If the pose looks off (e.g. upside down), pause on
-        // a review step so the user can redo it; otherwise finish.
-        _step = widget.motion.leverDirValid ? _Step.done : _Step.leverReview;
+        _step = _Step.done;
       }
     });
     if (_step == _Step.done && !_closeScheduled) {
       _closeScheduled = true;
+      // pop() (not maybePop) so the auto-close still works under a blocked
+      // PopScope in hard-gate mode.
       Timer(const Duration(milliseconds: 1200), () {
-        if (mounted) Navigator.of(context).maybePop();
+        if (mounted) Navigator.of(context).pop();
       });
     }
   }
@@ -94,26 +91,6 @@ class _CalibrationWizardState extends State<CalibrationWizard> {
       }
     });
   }
-
-  // Face-up pose looked off: either redo it, or accept it and move on.
-  void _recalibrateFaceUp() {
-    setState(() {
-      widget.motion.startCalibration();
-      _step = _Step.faceUpRunning;
-    });
-  }
-
-  void _continueToLever() => setState(() => _step = _Step.lever);
-
-  // Vertical pose looked off: either redo it, or accept it and finish.
-  void _recalibrateLever() {
-    setState(() {
-      widget.motion.startLeverCalibration();
-      _step = _Step.leverRunning;
-    });
-  }
-
-  void _continueToDone() => setState(() => _step = _Step.done);
 
   void _close() {
     widget.motion.cancelCalibration();
@@ -133,11 +110,9 @@ class _CalibrationWizardState extends State<CalibrationWizard> {
     switch (_step) {
       case _Step.faceUp:
       case _Step.faceUpRunning:
-      case _Step.faceUpReview:
         return "Place flat on table, forehand face up";
       case _Step.lever:
       case _Step.leverRunning:
-      case _Step.leverReview:
         return "Stand paddle vertically";
       case _Step.done:
         return "Done calibrating!";
@@ -145,11 +120,7 @@ class _CalibrationWizardState extends State<CalibrationWizard> {
   }
 
   int get _stepNumber =>
-      (_step == _Step.faceUp ||
-          _step == _Step.faceUpRunning ||
-          _step == _Step.faceUpReview)
-      ? 1
-      : 2;
+      (_step == _Step.faceUp || _step == _Step.faceUpRunning) ? 1 : 2;
 
   // Illustration for the current step (sketch of the required paddle pose).
   String get _stepAsset => _stepNumber == 1
@@ -163,150 +134,107 @@ class _CalibrationWizardState extends State<CalibrationWizard> {
     final btnText = Theme.of(context).brightness == Brightness.dark
         ? Colors.white
         : Colors.black;
-    return Scaffold(
-      body: SafeArea(
-        child: Column(
-          children: [
-            Align(
-              alignment: Alignment.topRight,
-              child: IconButton(
-                tooltip: "Close",
-                icon: const Icon(Icons.close),
-                onPressed: _close,
-              ),
-            ),
-            // Centre stage — a placeholder for the demo video/image to come.
-            Expanded(
-              child: Center(
-                child: Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 32),
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      if (done)
-                        const Padding(
-                          padding: EdgeInsets.only(bottom: 16),
-                          child: Icon(
-                            Icons.check_circle,
-                            size: 64,
-                            color: Colors.green,
-                          ),
-                        )
-                      else
-                        Padding(
-                          padding: const EdgeInsets.only(bottom: 44),
-                          child: SvgPicture.asset(
-                            _stepAsset,
-                            height: 270,
-                            fit: BoxFit.contain,
-                            colorFilter: ColorFilter.mode(
-                              Theme.of(context).colorScheme.onSurface,
-                              BlendMode.srcIn,
+    return PopScope(
+      // Hard gate when opened on connect: block the system back button too.
+      canPop: widget.dismissable,
+      child: Scaffold(
+        body: SafeArea(
+          child: Column(
+            children: [
+              // Close button only when dismissable; keep the spacing otherwise.
+              if (widget.dismissable)
+                Align(
+                  alignment: Alignment.topRight,
+                  child: IconButton(
+                    tooltip: "Close",
+                    icon: const Icon(Icons.close),
+                    onPressed: _close,
+                  ),
+                )
+              else
+                const SizedBox(height: 48),
+              // Centre stage — a placeholder for the demo video/image to come.
+              Expanded(
+                child: Center(
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 32),
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        if (done)
+                          const Padding(
+                            padding: EdgeInsets.only(bottom: 16),
+                            child: Icon(
+                              Icons.check_circle,
+                              size: 64,
+                              color: Colors.green,
+                            ),
+                          )
+                        else
+                          Padding(
+                            padding: const EdgeInsets.only(bottom: 44),
+                            child: SvgPicture.asset(
+                              _stepAsset,
+                              height: 270,
+                              fit: BoxFit.contain,
+                              colorFilter: ColorFilter.mode(
+                                Theme.of(context).colorScheme.onSurface,
+                                BlendMode.srcIn,
+                              ),
                             ),
                           ),
+                        Text(
+                          _centerText,
+                          textAlign: TextAlign.center,
+                          style: const TextStyle(
+                            fontSize: 26,
+                            fontWeight: FontWeight.w600,
+                          ),
                         ),
-                      Text(
-                        _centerText,
-                        textAlign: TextAlign.center,
-                        style: const TextStyle(
-                          fontSize: 26,
-                          fontWeight: FontWeight.w600,
-                        ),
-                      ),
-                      if (_step == _Step.faceUpReview ||
-                          _step == _Step.leverReview)
-                        const Padding(
-                          padding: EdgeInsets.only(top: 12),
-                          child: Text(
-                            "Warning: pose looks off",
-                            textAlign: TextAlign.center,
-                            style: TextStyle(
-                              fontSize: 18,
-                              fontWeight: FontWeight.w600,
-                              color: Colors.orange,
+                        if (_stepNumber == 1)
+                          const Padding(
+                            padding: EdgeInsets.only(top: 12),
+                            child: Text(
+                              "Keep the handle hanging off the edge as it is "
+                              "thicker than the face",
+                              textAlign: TextAlign.center,
+                              style: TextStyle(
+                                fontSize: 13,
+                                color: Colors.grey,
+                              ),
                             ),
                           ),
-                        ),
-                      if (_stepNumber == 1)
-                        const Padding(
-                          padding: EdgeInsets.only(top: 12),
-                          child: Text(
-                            "Keep the handle hanging off the edge as it is "
-                            "thicker than the face",
-                            textAlign: TextAlign.center,
-                            style: TextStyle(fontSize: 13, color: Colors.grey),
-                          ),
-                        ),
-                    ],
+                      ],
+                    ),
                   ),
                 ),
               ),
-            ),
-            // Bottom controls.
-            Padding(
-              padding: const EdgeInsets.fromLTRB(24, 8, 24, 32),
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  if (!done)
-                    Text(
-                      widget.canCalibrate
-                          ? "Step $_stepNumber of 2"
-                          : "Connect the paddle to calibrate",
-                      style: TextStyle(
-                        color: widget.canCalibrate
-                            ? Colors.grey
-                            : Colors.orange,
+              // Bottom controls.
+              Padding(
+                padding: const EdgeInsets.fromLTRB(24, 8, 24, 32),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    if (!done)
+                      Text(
+                        widget.canCalibrate
+                            ? "Step $_stepNumber of 2"
+                            : "Connect the paddle to calibrate",
+                        style: TextStyle(
+                          color: widget.canCalibrate
+                              ? Colors.grey
+                              : Colors.orange,
+                        ),
                       ),
+                    const SizedBox(height: 10),
+                    // Reserve space so the layout doesn't jump when the bar shows.
+                    SizedBox(
+                      height: 6,
+                      child: _running
+                          ? LinearProgressIndicator(value: _progress)
+                          : null,
                     ),
-                  const SizedBox(height: 10),
-                  // Reserve space so the layout doesn't jump when the bar shows.
-                  SizedBox(
-                    height: 6,
-                    child: _running
-                        ? LinearProgressIndicator(value: _progress)
-                        : null,
-                  ),
-                  const SizedBox(height: 16),
-                  if (_step == _Step.faceUpReview ||
-                      _step == _Step.leverReview)
-                    // Pose looked off: let the user redo it or accept and go on.
-                    Row(
-                      children: [
-                        Expanded(
-                          child: OutlinedButton(
-                            onPressed: _step == _Step.faceUpReview
-                                ? _recalibrateFaceUp
-                                : _recalibrateLever,
-                            style: OutlinedButton.styleFrom(
-                              foregroundColor: btnText,
-                              padding: const EdgeInsets.symmetric(vertical: 16),
-                            ),
-                            child: const Text(
-                              "Recalibrate",
-                              style: TextStyle(fontSize: 18),
-                            ),
-                          ),
-                        ),
-                        const SizedBox(width: 12),
-                        Expanded(
-                          child: ElevatedButton(
-                            onPressed: _step == _Step.faceUpReview
-                                ? _continueToLever
-                                : _continueToDone,
-                            style: ElevatedButton.styleFrom(
-                              foregroundColor: btnText,
-                              padding: const EdgeInsets.symmetric(vertical: 16),
-                            ),
-                            child: const Text(
-                              "Continue",
-                              style: TextStyle(fontSize: 18),
-                            ),
-                          ),
-                        ),
-                      ],
-                    )
-                  else
+                    const SizedBox(height: 16),
                     SizedBox(
                       width: double.infinity,
                       child: ElevatedButton(
@@ -323,10 +251,11 @@ class _CalibrationWizardState extends State<CalibrationWizard> {
                         ),
                       ),
                     ),
-                ],
+                  ],
+                ),
               ),
-            ),
-          ],
+            ],
+          ),
         ),
       ),
     );

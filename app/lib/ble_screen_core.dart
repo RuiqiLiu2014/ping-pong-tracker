@@ -769,10 +769,13 @@ mixin _BleScreenCore
     });
     _charSubscription = char.onValueReceived.listen(_onPacket);
     // Enforce calibration on every connect — many metrics (splits, spin ratio,
-    // face angle, true speeds) depend on it. Open the wizard as soon as
-    // streaming starts, after the frame so the Connection tab is mounted first.
+    // face angle, true speeds) depend on it. Open the wizard (as a hard gate:
+    // no X) as soon as streaming starts, after the frame so the Connection tab
+    // is mounted first.
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (mounted && _connectionStatus == "Streaming Data") _openCalibration();
+      if (mounted && _connectionStatus == "Streaming Data") {
+        _openCalibration(dismissable: false);
+      }
     });
   }
 
@@ -1030,6 +1033,12 @@ mixin _BleScreenCore
   void _resetConnectionUi() {
     _scanTimeoutTimer?.cancel();
     if (!mounted) return;
+    // Close the calibration wizard if it's still up: there's nothing to
+    // calibrate once disconnected, and a hard-gated wizard has no X of its own.
+    if (_calRouteOpen) {
+      _calRouteOpen = false;
+      Navigator.of(context).pop();
+    }
     setState(() {
       _targetDevice = null;
       _isConnecting = false;
@@ -1060,15 +1069,25 @@ mixin _BleScreenCore
   }
 
   // Open the full-screen two-step calibration wizard (face-up, then tip-up).
-  void _openCalibration() {
+  // [dismissable] false = hard gate (opened on connect): no X, system back
+  // blocked, so the user must complete calibration. _calRouteOpen lets the
+  // connection teardown close it if the paddle drops mid-calibration.
+  bool _calRouteOpen = false;
+  void _openCalibration({bool dismissable = true}) {
     final streaming = _connectionStatus == "Streaming Data";
-    Navigator.of(context).push(
-      MaterialPageRoute(
-        fullscreenDialog: true,
-        builder: (_) =>
-            CalibrationWizard(motion: _motion, canCalibrate: streaming),
-      ),
-    );
+    _calRouteOpen = true;
+    Navigator.of(context)
+        .push(
+          MaterialPageRoute(
+            fullscreenDialog: true,
+            builder: (_) => CalibrationWizard(
+              motion: _motion,
+              canCalibrate: streaming,
+              dismissable: dismissable,
+            ),
+          ),
+        )
+        .then((_) => _calRouteOpen = false);
   }
 
   // Called when a "tip up" lever calibration completes: persist the measured
