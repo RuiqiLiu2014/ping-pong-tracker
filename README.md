@@ -32,15 +32,15 @@ There are sports trackers out there for racket sports, but they tend to be expen
 <!-- 2-4 app screenshots. A table keeps them aligned. -->
 | Connection screen | Calibration wizard 1 | Calibration wizard 2 |
 |---|---|---|
-| ![Connection screen](docs/img/connection.png) | ![Calibration wizard 1](docs/img/calibration1.png) | ![Calibration wizard 2](docs/img/calibration2.png) |
+| <img src="docs/img/connection.png" width="240" alt="Connection screen"> | <img src="docs/img/calibration1.png" width="240" alt="Calibration wizard 1"> | <img src="docs/img/calibration2.png" width="240" alt="Calibration wizard 2"> |
 
 | Logs list | Log graphs 1 | Log graphs 2 |
 |---|---|---|
-| ![Logs list](docs/img/logs_list.png) | ![Log graphs 1](docs/img/log1.png) | ![Log graphs 2](docs/img/log2.png) |
+| <img src="docs/img/logs_list.png" width="240" alt="Logs list"> | <img src="docs/img/log1.png" width="240" alt="Log graphs 1"> | <img src="docs/img/log2.png" width="240" alt="Log graphs 2"> |
 
 | Settings 1 | Settings 2 | Settings 3 |
 |---|---|---|
-| ![Settings 1](docs/img/settings1.png) | ![Settings 2](docs/img/settings2.png) | ![Settings 3](docs/img/settings3.png) |
+| <img src="docs/img/settings1.png" width="240" alt="Settings 1"> | <img src="docs/img/settings2.png" width="240" alt="Settings 2"> | <img src="docs/img/settings3.png" width="240" alt="Settings 3"> |
 
 ---
 
