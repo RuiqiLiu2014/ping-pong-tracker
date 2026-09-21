@@ -281,23 +281,13 @@ mixin _BleScreenUi on _BleScreenCore {
               style: const TextStyle(fontSize: 15, color: Colors.grey),
             ),
           const SizedBox(height: 14),
-          if (_calReminderDue && streaming)
-            Padding(
-              padding: const EdgeInsets.only(bottom: 8),
-              child: Text(
-                "$_useSinceCal hits & swings since last calibration — "
-                "consider recalibrating.",
-                textAlign: TextAlign.center,
-                style: const TextStyle(fontSize: 13, color: Colors.orange),
-              ),
-            ),
           OutlinedButton.icon(
             // Calibration reads live IMU data, so it's only available while
             // streaming (disabled when disconnected, plugged in, or fw-outdated).
             onPressed: streaming ? _openCalibration : null,
             style: OutlinedButton.styleFrom(foregroundColor: btnText),
             icon: const Icon(Icons.explore),
-            label: const Text("Calibrate"),
+            label: const Text("Recalibrate"),
           ),
           const SizedBox(height: 8),
           ElevatedButton(

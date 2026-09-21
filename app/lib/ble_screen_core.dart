@@ -174,10 +174,6 @@ mixin _BleScreenCore
   // Calibrated sensor->tip direction (board frame) from the "tip up" pose,
   // persisted. Sets the ω×r direction for the true face speed. Null = default.
   List<double>? _leverDir;
-  // Hits + swings since the last calibration (persisted). Drives a recalibrate
-  // nudge; _calReminderDue is snapshotted at connect so it can't pop mid-session.
-  int _useSinceCal = 0;
-  bool _calReminderDue = false;
   SharedPreferences? _prefs;
 
   // Accelerometer and gyroscope are drawn on separate, independently-scaled
@@ -262,7 +258,6 @@ mixin _BleScreenCore
     final ldx = prefs.getDouble(_kLeverDirXKey);
     final ldy = prefs.getDouble(_kLeverDirYKey);
     final ldz = prefs.getDouble(_kLeverDirZKey);
-    final usc = prefs.getInt(_kUseSinceCalKey);
     if (!mounted) return;
     setState(() {
       if (autoLog != null) _autoLoggingEnabled = autoLog;
@@ -294,7 +289,6 @@ mixin _BleScreenCore
         _leverDir = [ldx, ldy, ldz];
         _motion.setLeverDir(ldx, ldy, ldz);
       }
-      if (usc != null) _useSinceCal = usc;
       _hitDetector.threshold = _hitThreshG;
       _motion.leverArmM = kLeverArmM;
     });
@@ -772,11 +766,14 @@ mixin _BleScreenCore
     setState(() {
       _connectionStatus = "Streaming Data";
       _isConnecting = false;
-      // Snapshot the recalibrate nudge for this session (only if calibrated), so
-      // it shows at connect and never pops up mid-use.
-      _calReminderDue = _faceNormal != null && _useSinceCal >= kCalReminderUses;
     });
     _charSubscription = char.onValueReceived.listen(_onPacket);
+    // Enforce calibration on every connect — many metrics (splits, spin ratio,
+    // face angle, true speeds) depend on it. Open the wizard as soon as
+    // streaming starts, after the frame so the Connection tab is mounted first.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted && _connectionStatus == "Streaming Data") _openCalibration();
+    });
   }
 
   // True if the connected firmware is at least major.minor (picks packet format).
@@ -1033,10 +1030,6 @@ mixin _BleScreenCore
   void _resetConnectionUi() {
     _scanTimeoutTimer?.cancel();
     if (!mounted) return;
-    _prefs?.setInt(
-      _kUseSinceCalKey,
-      _useSinceCal,
-    ); // flush hits since last save
     setState(() {
       _targetDevice = null;
       _isConnecting = false;
@@ -1051,7 +1044,6 @@ mixin _BleScreenCore
       _notCharging = false;
       _firmwareVersion = "?";
       _fwOutdated = false;
-      _calReminderDue = false;
       _imuData = ["0.00", "0.00", "0.00", "0.00", "0.00", "0.00"];
       _armed = false;
       _pendingHits.clear();
@@ -1087,10 +1079,6 @@ mixin _BleScreenCore
     _prefs?.setDouble(_kLeverDirXKey, d[0]);
     _prefs?.setDouble(_kLeverDirYKey, d[1]);
     _prefs?.setDouble(_kLeverDirZKey, d[2]);
-    // Full calibration just finished (lever is the last step): clear the nudge.
-    _useSinceCal = 0;
-    _prefs?.setInt(_kUseSinceCalKey, 0);
-    _calReminderDue = false;
     _speedCache.clear(); // ω×r direction changed -> recompute
     if (mounted) setState(() {});
   }
@@ -1220,7 +1208,6 @@ mixin _BleScreenCore
   // Record a detected ball-hit (absolute stream time); keep a bounded history
   // so a capture that reaches back through the ring buffer still sees its hits.
   void _recordHit(double t) {
-    _useSinceCal++; // a ball hit jostles the mounting (persisted on next flush)
     _recentHits.add(t);
     while (_recentHits.isNotEmpty && _recentHits.first < t - 13.0) {
       _recentHits.removeAt(0); // ~13 s covers the max capture length
@@ -1265,8 +1252,6 @@ mixin _BleScreenCore
       _logs.insert(0, created);
       _prefs?.setInt(_kLogSeqKey, _logSeq); // remember the last issued number
       _persistLog(created); // survive restarts
-      _useSinceCal++; // this swing; the write also flushes hits since last save
-      _prefs?.setInt(_kUseSinceCalKey, _useSinceCal);
     }
     _capCount = 0;
   }
