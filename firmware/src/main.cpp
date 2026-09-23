@@ -193,6 +193,12 @@ void updateStatusLed() {
 }
 
 void setup() {
+  // Let the LSM6DS3 finish its power-on boot (~15-35 ms) before the first I2C
+  // access. The old `while (!Serial ...)` wait used to provide this cushion
+  // incidentally (a full 2 s on battery); without it, myIMU.begin() can run
+  // before the IMU is ready on a cold boot and hang the board on the check below.
+  delay(100);
+
   // ---- IMU: configure for the maximum ODR both sensors share (1660 Hz) ----
   myIMU.settings.gyroEnabled      = 1;
   myIMU.settings.gyroRange        = 2000;   // deg/s
