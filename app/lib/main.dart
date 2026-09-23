@@ -33,6 +33,7 @@ const String _kAutoLoggingKey = "autoLoggingEnabled";
 const String _kHitWindowKey = "hitWindowSec";
 const String _kManualTimeoutKey = "manualTimeoutSec";
 const String _kHitThreshKey = "hitThreshG";
+const String _kHitCooldownKey = "hitCooldownMs";
 const String _kSwingHpKey = "swingHpSec";
 const String _kMinScaleKey = "minScaleMps";
 const String _kShowAccelKey = "showAccelGraph";

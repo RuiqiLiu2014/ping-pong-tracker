@@ -156,6 +156,8 @@ mixin _BleScreenCore
   double _hitWindowSec = 0.9;
   double _manualTimeoutSec = 4.0; // manual logging auto-stop (0.1 - 5.0 s)
   double _hitThreshG = 0.5; // ball-hit vibration threshold (lower = sensitive)
+  double _hitCooldownMs = 250.0; // min spacing between hits (0-500 ms); one
+  // impact's secondary ring lands ~70 ms later, so a cooldown avoids double hits
   double _swingHpSec = 0.35; // swing-speed high-pass window (0.2 - 0.7 s)
   double _minScaleMps = 5.0; // min top of the speed-graph y-axis (0 = off)
   bool _showAccelGraph = true; // show the raw accelerometer graph in log detail
@@ -240,6 +242,7 @@ mixin _BleScreenCore
     final win = prefs.getDouble(_kHitWindowKey);
     final timeout = prefs.getDouble(_kManualTimeoutKey);
     final hitThr = prefs.getDouble(_kHitThreshKey);
+    final hitCd = prefs.getDouble(_kHitCooldownKey);
     final swingHp = prefs.getDouble(_kSwingHpKey);
     final minScale = prefs.getDouble(_kMinScaleKey);
     final showAccel = prefs.getBool(_kShowAccelKey);
@@ -272,6 +275,7 @@ mixin _BleScreenCore
       if (win != null) _hitWindowSec = win.clamp(0.25, 2.0);
       if (timeout != null) _manualTimeoutSec = timeout.clamp(0.1, 5.0);
       if (hitThr != null) _hitThreshG = hitThr.clamp(0.1, 1.5);
+      if (hitCd != null) _hitCooldownMs = hitCd.clamp(0.0, 500.0);
       if (swingHp != null) _swingHpSec = swingHp.clamp(0.2, 0.7);
       if (minScale != null) _minScaleMps = minScale.clamp(0.0, 20.0);
       if (showAccel != null) _showAccelGraph = showAccel;
@@ -290,6 +294,7 @@ mixin _BleScreenCore
         _motion.setLeverDir(ldx, ldy, ldz);
       }
       _hitDetector.threshold = _hitThreshG;
+      _hitDetector.refractory = _hitCooldownMs / 1000.0;
       _motion.leverArmM = kLeverArmM;
     });
   }

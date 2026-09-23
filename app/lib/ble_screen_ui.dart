@@ -1807,7 +1807,9 @@ mixin _BleScreenUi on _BleScreenCore {
       ),
       const SizedBox(height: 4),
       const Text(
-        "Lower threshold catches weaker hits, but risks false triggers.",
+        "Lower threshold catches weaker hits, but risks false triggers. The "
+        "cooldown ignores repeat triggers within its window, so one impact's "
+        "ring isn't counted as a second hit.",
         style: TextStyle(color: Colors.grey),
       ),
       const SizedBox(height: 8),
@@ -1824,6 +1826,20 @@ mixin _BleScreenUi on _BleScreenCore {
           _hitDetector.threshold = v;
         }),
         onChangeEnd: (v) => _prefs?.setDouble(_kHitThreshKey, v),
+      ),
+      _settingSlider(
+        label: "Hit cooldown",
+        value: _hitCooldownMs,
+        min: 0,
+        max: 500,
+        divisions: 50, // 10 ms steps
+        unit: "ms",
+        decimals: 0,
+        onChanged: (v) => setState(() {
+          _hitCooldownMs = v;
+          _hitDetector.refractory = v / 1000.0;
+        }),
+        onChangeEnd: (v) => _prefs?.setDouble(_kHitCooldownKey, v),
       ),
     ];
   }

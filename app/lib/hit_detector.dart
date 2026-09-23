@@ -15,7 +15,6 @@ class HitDetector {
   static const double _dt = 1.0 / 1660.0; // fixed IMU ODR (matches estimator)
   static const double _fcHp = 120.0; // high-pass corner (Hz)
   static const double _tauEnv = 0.006; // envelope time constant (s)
-  static const double _refractory = 0.05; // min spacing between hits (s)
   static const double _hystRatio = 0.4; // re-arm when env falls below thr*ratio
 
   // Filter coefficients derived from the constants above.
@@ -25,12 +24,17 @@ class HitDetector {
   /// Envelope threshold in g. Lower = more sensitive (catches weaker hits).
   double threshold;
 
+  /// Minimum spacing between successive hits (s) — a cooldown that swallows a
+  /// hit's own secondary ring (a hard impact bursts again ~70 ms later) so one
+  /// stroke fires once. User-adjustable in Settings.
+  double refractory;
+
   double _lp1 = 0, _lp2 = 0, _env = 0;
   bool _triggered = false;
   bool _seeded = false;
   double _lastHit = -1e9;
 
-  HitDetector({this.threshold = 0.5});
+  HitDetector({this.threshold = 0.5, this.refractory = 0.25});
 
   void reset() {
     _lp1 = 0;
@@ -61,7 +65,7 @@ class HitDetector {
 
     bool hit = false;
     if (!_triggered) {
-      if (rms >= threshold && (t - _lastHit) > _refractory) {
+      if (rms >= threshold && (t - _lastHit) > refractory) {
         hit = true;
         _lastHit = t;
         _triggered = true;
