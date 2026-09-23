@@ -89,10 +89,6 @@ uint32_t lastStatusMs = 0;       // cadence for charging-status packets
 //   On battery: blue (ok) or red (low) — blink while BLE-searching, solid when
 //               BLE-connected.  (off only when powered down)
 #define LED_BLINK_MS   300   // half-period of the searching / charging flash
-// Active-low PWM: brightness rises as the value falls (~50% ≈ 128, ~75% ≈ 64).
-#define LED_DUTY_BLUE  128   // ~50%
-#define LED_DUTY_GREEN 0     // 100% (max brightness)
-#define LED_DUTY_RED   128   // ~50% (tune later)
 #define BATT_LOW_MV   3730   // low-battery: matches the app's red threshold (LiPo 20%)
 #define BATT_LOW_CLR  3770   // hysteresis: clear "low" only once back above this
 // Plugged + not charging + VBAT below this => treat as "not charging" (typically
@@ -113,7 +109,6 @@ void connectCallback(uint16_t connHandle) {
   conn->requestConnectionParameter(6);    // 6 * 1.25 ms = 7.5 ms interval
   sampleIndexTotal = 0;                    // restart the sample counter per link
   connected = true;
-  Serial.println("Central connected");
 }
 
 void disconnectCallback(uint16_t connHandle, uint8_t reason) {
@@ -121,7 +116,6 @@ void disconnectCallback(uint16_t connHandle, uint8_t reason) {
   (void)reason;
   connected = false;
   sampleCount = 0;
-  Serial.println("Central disconnected");
 }
 
 // Read the battery divider (oversampled) into batteryMv + coarse batteryPct.
@@ -146,9 +140,9 @@ void sampleBattery() {
 // Per-colour lit level (active-low: lower = brighter).
 static inline uint8_t ledLit(LedColor c) {
   switch (c) {
-    case LED_C_GREEN: return LED_DUTY_GREEN;
-    case LED_C_RED:   return LED_DUTY_RED;
-    default:          return LED_DUTY_BLUE;
+    case LED_C_GREEN: return 0;
+    case LED_C_RED:   return 64;
+    default:          return 128;
   }
 }
 
@@ -199,10 +193,6 @@ void updateStatusLed() {
 }
 
 void setup() {
-  Serial.begin(115200);
-  uint32_t startWait = millis();
-  while (!Serial && (millis() - startWait < 2000)) {}
-
   // ---- IMU: configure for the maximum ODR both sensors share (1660 Hz) ----
   myIMU.settings.gyroEnabled      = 1;
   myIMU.settings.gyroRange        = 2000;   // deg/s
@@ -214,7 +204,6 @@ void setup() {
   myIMU.settings.accelFifoEnabled = 0;
   myIMU.settings.tempEnabled      = 0;
   if (myIMU.begin() != 0) {
-    Serial.println("IMU init failed");
     while (1) {}
   }
   Wire1.setClock(400000);   // 400 kHz I2C so a 12-byte burst read is ~0.35 ms
@@ -262,7 +251,6 @@ void setup() {
 
   lastFlushMs = millis();
   lastBattUs  = micros();
-  Serial.println("PaddleTrack advertising (Bluefruit, 1660 Hz IMU)");
 }
 
 void loop() {

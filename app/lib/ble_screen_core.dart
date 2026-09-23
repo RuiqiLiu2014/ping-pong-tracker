@@ -4,7 +4,7 @@ part of 'main.dart';
 // packet format (no back-compat), so an older board is rejected on connect with
 // an "update firmware" note. Bump these when the firmware packet format changes.
 const int _kReqFwMajor = 1;
-const int _kReqFwMinor = 3;
+const int _kReqFwMinor = 5;
 
 // All connection, packet, capture/logging, persistence and estimator glue
 // for the paddle screen. UI builders live in ble_screen_ui.dart.
