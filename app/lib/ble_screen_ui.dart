@@ -1011,14 +1011,16 @@ mixin _BleScreenUi on _BleScreenCore {
               info:
                   "Percentage of the paddle's motion that contributes to spin.",
             ),
-          // 5. Face angle — paddle-face tilt vs vertical through the swing.
+          // 5. Forehand face angle — tilt of the calibrated (forehand) face vs
+          // vertical. Only the forehand face is measurable from orientation, so
+          // the sign is inverted for backhand strokes (see info text).
           if (_showFaceAngle)
             _chartSection(
-              "Face angle",
+              "Forehand face angle",
               log,
               [ss.faceAngle],
               const [Colors.brown],
-              const ["face angle"],
+              const ["forehand face"],
               forcedMin: -90,
               forcedMax: 90,
               cornerText: cornerAt(
@@ -1027,9 +1029,11 @@ mixin _BleScreenUi on _BleScreenCore {
               unit: "°",
               decimals: 0,
               info:
-                  "Tilt of the paddle face vs vertical through the swing. "
-                  "+ = open / facing up (e.g. a push from below), "
-                  "− = closed / facing down (e.g. a drive).",
+                  "Tilt of the forehand (calibrated) face vs vertical. "
+                  "+ = forehand side facing up, − = forehand side facing down. "
+                  "Inverted for backhand strokes: a backhand holds the paddle in "
+                  "the same orientation as the opposite forehand, so the sign "
+                  "flips.",
             ),
         ] else if (_showFaceRotation) ...[
           _chartSection(
@@ -1710,7 +1714,7 @@ mixin _BleScreenUi on _BleScreenCore {
         (v) => _showSpinRatio = v,
       ),
       _graphToggle(
-        "Face angle",
+        "Forehand face angle",
         _showFaceAngle,
         _kShowFaceAngleKey,
         (v) => _showFaceAngle = v,
