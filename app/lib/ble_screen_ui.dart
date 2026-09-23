@@ -1204,13 +1204,14 @@ mixin _BleScreenUi on _BleScreenCore {
     if (hitIdxs.isEmpty || ss.maxTrueFaceSpeed <= 0) return const [];
     final double peakT = log.t[peakIdx];
     return [
-      for (final hi in hitIdxs)
+      for (int k = 0; k < hitIdxs.length; k++)
         Padding(
           padding: const EdgeInsets.fromLTRB(12, 8, 12, 0),
           child: Text(
             _hitTimingText(
-              log.t[hi],
-              ss.trueFaceSpeed[hi],
+              k + 1,
+              log.t[hitIdxs[k]],
+              ss.trueFaceSpeed[hitIdxs[k]],
               ss.maxTrueFaceSpeed,
               peakT,
             ),
@@ -1220,8 +1221,9 @@ mixin _BleScreenUi on _BleScreenCore {
     ];
   }
 
-  // "hit was 90% of peak speed, 18 ms before fastest point".
+  // "Hit #1 was 90% of peak speed, 18 ms before fastest point".
   String _hitTimingText(
+    int hitNum,
     double hitT,
     double hitSpeed,
     double peakSpeed,
@@ -1233,7 +1235,7 @@ mixin _BleScreenUi on _BleScreenCore {
     final String rel = ms == 0
         ? "at fastest point"
         : "$ms ms ${dtMs < 0 ? 'before' : 'after'} fastest point";
-    return "hit was $pct% of peak speed, $rel";
+    return "Hit #$hitNum was $pct% of peak speed, $rel";
   }
 
   Widget _chartSection(
