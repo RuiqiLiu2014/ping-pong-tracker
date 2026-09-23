@@ -19,6 +19,10 @@ class SavedLog {
   // capture. Frozen alongside faceNormal so ω×r face/swing speed also stays
   // stable across later recalibration. Null for logs recorded before this.
   final List<double>? leverDir;
+  // How this log was captured: true = auto-capture (one central trigger hit per
+  // log), false = manual logging (may hold several hits). Governs which hit(s)
+  // the per-hit stats annotate. Defaults true; older logs load as auto-captured.
+  final bool autoCaptured;
 
   SavedLog(
     this.id,
@@ -32,6 +36,7 @@ class SavedLog {
     this.droppedSamples = 0,
     this.faceNormal,
     this.leverDir,
+    this.autoCaptured = true,
   });
 
   String get displayName => name.isEmpty ? "Log #$id" : name;

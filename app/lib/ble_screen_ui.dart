@@ -838,48 +838,40 @@ mixin _BleScreenUi on _BleScreenCore {
   }
 
   Widget _logCharts(SavedLog log, SpeedSeries ss) {
-    // Spin ratio = brushing fraction of the whole paddle-face motion
-    // (∥ ÷ total overall paddle speed) as a percentage: how grazing the contact
-    // is (0% = flat drive, 100% = pure brush). Uses the overall paddle speed
-    // (translation + rotation), not rotation alone, so translational brushing
-    // counts too. Gated to 0 while the paddle is slow so a still paddle reads 0.
+    // Brushing % series = ∥ ÷ total overall paddle speed (translation +
+    // rotation), gated to 0 while the paddle is slow so a still paddle reads 0.
     Float32List? spin;
-    double peakSpin = 0; // spin % at the fastest instant
-    double? hitSpin; // spin % at the first ball hit, if the log has one
     if (ss.hasComponents) {
       const double gate =
-          0.5; // m/s of paddle speed below which spin is unreliable
+          0.5; // m/s of paddle speed below which brushing % is unreliable
       spin = Float32List(log.count);
-      double fastest = 0;
       for (int i = 0; i < log.count; i++) {
         final double f = ss.trueFaceSpeed[i];
-        final double s = f > gate
-            ? 100.0 * math.min(1.0, ss.trueFacePar[i] / f)
-            : 0.0;
-        spin[i] = s;
-        if (f > fastest) {
-          fastest = f;
-          peakSpin = s; // spin at the fastest instant = the meaningful one
-        }
-      }
-      if (log.hitTimes.isNotEmpty) {
-        // Spin at the sample nearest the first ball hit.
-        final double ht = log.hitTimes.first;
-        int hi = 0;
-        double best = double.infinity;
-        for (int i = 0; i < log.count; i++) {
-          final double d = (log.t[i] - ht).abs();
-          if (d < best) {
-            best = d;
-            hi = i;
-          }
-        }
-        hitSpin = spin[hi];
+        spin[i] = f > gate ? 100.0 * math.min(1.0, ss.trueFacePar[i] / f) : 0.0;
       }
     }
+    // Hit sample(s) to annotate: the central hit for an auto-capture log, or
+    // every hit for a manual log. Corner stats + the timing line read the graph
+    // values AT these samples; empty => no corner text and no timing line.
+    final List<int> hitIdxs = _hitSampleIdxs(log);
+    // Fastest point = sample of peak overall paddle speed, for the timing stat.
+    int peakIdx = 0;
+    double peakVal = 0;
+    for (int i = 0; i < log.count; i++) {
+      if (ss.trueFaceSpeed[i] > peakVal) {
+        peakVal = ss.trueFaceSpeed[i];
+        peakIdx = i;
+      }
+    }
+    // Corner = the graph's value(s) at each hit sample, one line per hit; null
+    // (no corner) when the log has no hits.
+    String? cornerAt(String Function(int i) fmt) =>
+        hitIdxs.isEmpty ? null : hitIdxs.map(fmt).join("\n");
+
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
+        ..._hitStatLines(log, ss, hitIdxs, peakIdx),
         if (log.hitTimes.isNotEmpty)
           Padding(
             padding: const EdgeInsets.fromLTRB(12, 6, 12, 0),
@@ -910,10 +902,12 @@ mixin _BleScreenUi on _BleScreenCore {
                   const ["total", "⟂", "∥"],
                   forcedMin: 0,
                   minTop: _minScaleMps,
-                  cornerText:
-                      "max ${ss.maxTrueFaceSpeed.toStringAsFixed(1)} · "
-                      "⟂ ${ss.maxTrueFacePerp.toStringAsFixed(1)} · "
-                      "∥ ${ss.maxTrueFacePar.toStringAsFixed(1)} m/s",
+                  cornerText: cornerAt(
+                    (i) =>
+                        "${ss.trueFaceSpeed[i].toStringAsFixed(1)} · "
+                        "⟂ ${ss.trueFacePerp[i].toStringAsFixed(1)} · "
+                        "∥ ${ss.trueFacePar[i].toStringAsFixed(1)} m/s",
+                  ),
                   unit: "m/s",
                   decimals: 2,
                   info:
@@ -929,8 +923,9 @@ mixin _BleScreenUi on _BleScreenCore {
                   const ["paddle speed"],
                   forcedMin: 0,
                   minTop: _minScaleMps,
-                  cornerText:
-                      "max ${ss.maxTrueFaceSpeed.toStringAsFixed(1)} m/s",
+                  cornerText: cornerAt(
+                    (i) => "${ss.trueFaceSpeed[i].toStringAsFixed(1)} m/s",
+                  ),
                   unit: "m/s",
                   decimals: 2,
                   info:
@@ -949,10 +944,12 @@ mixin _BleScreenUi on _BleScreenCore {
                   const ["total", "⟂", "∥"],
                   forcedMin: 0,
                   minTop: _minScaleMps,
-                  cornerText:
-                      "max ${ss.maxSwingSpeed.toStringAsFixed(1)} · "
-                      "⟂ ${ss.maxSwingPerp.toStringAsFixed(1)} · "
-                      "∥ ${ss.maxSwingPar.toStringAsFixed(1)} m/s",
+                  cornerText: cornerAt(
+                    (i) =>
+                        "${ss.swingSpeed[i].toStringAsFixed(1)} · "
+                        "⟂ ${ss.swingPerp[i].toStringAsFixed(1)} · "
+                        "∥ ${ss.swingPar[i].toStringAsFixed(1)} m/s",
+                  ),
                   unit: "m/s",
                   decimals: 2,
                   info:
@@ -967,7 +964,9 @@ mixin _BleScreenUi on _BleScreenCore {
                   const ["hand speed"],
                   forcedMin: 0,
                   minTop: _minScaleMps,
-                  cornerText: "max ${ss.maxSwingSpeed.toStringAsFixed(1)} m/s",
+                  cornerText: cornerAt(
+                    (i) => "${ss.swingSpeed[i].toStringAsFixed(1)} m/s",
+                  ),
                   unit: "m/s",
                   decimals: 2,
                   info: "Speed of your hand.",
@@ -984,10 +983,12 @@ mixin _BleScreenUi on _BleScreenCore {
               const ["total", "⟂", "∥"],
               forcedMin: 0,
               minTop: _minScaleMps,
-              cornerText:
-                  "max ${ss.maxFaceSpeed.toStringAsFixed(1)} · "
-                  "⟂ ${ss.maxFacePerp.toStringAsFixed(1)} · "
-                  "∥ ${ss.maxFacePar.toStringAsFixed(1)} m/s",
+              cornerText: cornerAt(
+                (i) =>
+                    "${ss.faceSpeed[i].toStringAsFixed(1)} · "
+                    "⟂ ${ss.facePerp[i].toStringAsFixed(1)} · "
+                    "∥ ${ss.facePar[i].toStringAsFixed(1)} m/s",
+              ),
               unit: "m/s",
               decimals: 2,
               info:
@@ -1004,10 +1005,7 @@ mixin _BleScreenUi on _BleScreenCore {
               const ["brushing %"],
               forcedMin: 0,
               forcedMax: 100,
-              cornerText: hitSpin == null
-                  ? "at peak speed: ${peakSpin.toStringAsFixed(0)}%"
-                  : "at peak speed: ${peakSpin.toStringAsFixed(0)}%\n"
-                        "at hit: ${hitSpin.toStringAsFixed(0)}%",
+              cornerText: cornerAt((i) => "${spin![i].toStringAsFixed(0)}%"),
               unit: "%",
               decimals: 0,
               info:
@@ -1021,10 +1019,11 @@ mixin _BleScreenUi on _BleScreenCore {
               [ss.faceAngle],
               const [Colors.brown],
               const ["face angle"],
-              centerZero: true,
-              cornerText:
-                  "${ss.faceAngleMin.toStringAsFixed(0)}° … "
-                  "${ss.faceAngleMax.toStringAsFixed(0)}°",
+              forcedMin: -90,
+              forcedMax: 90,
+              cornerText: cornerAt(
+                (i) => "${ss.faceAngle[i].toStringAsFixed(0)}°",
+              ),
               unit: "°",
               decimals: 0,
               info:
@@ -1041,7 +1040,9 @@ mixin _BleScreenUi on _BleScreenCore {
             const ["rotation"],
             forcedMin: 0,
             minTop: _minScaleMps,
-            cornerText: "max ${ss.maxFaceSpeed.toStringAsFixed(1)} m/s",
+            cornerText: cornerAt(
+              (i) => "${ss.faceSpeed[i].toStringAsFixed(1)} m/s",
+            ),
             unit: "m/s",
             decimals: 2,
             info:
@@ -1155,6 +1156,84 @@ mixin _BleScreenUi on _BleScreenCore {
         ),
       ),
     );
+  }
+
+  // Sample indices of the hit(s) to annotate: the central hit for an auto-
+  // capture log (the trigger, nearest the window's middle), or every hit in
+  // time order for a manual log. Empty when the log has no detected hits.
+  List<int> _hitSampleIdxs(SavedLog log) {
+    if (log.hitTimes.isEmpty || log.count == 0) return const [];
+    int nearest(double ht) {
+      int hi = 0;
+      double best = double.infinity;
+      for (int i = 0; i < log.count; i++) {
+        final double d = (log.t[i] - ht).abs();
+        if (d < best) {
+          best = d;
+          hi = i;
+        }
+      }
+      return hi;
+    }
+
+    if (log.autoCaptured) {
+      // Central hit = the one nearest the middle of the window (the trigger).
+      final double mid = log.durationSec / 2;
+      double best = double.infinity;
+      double central = log.hitTimes.first;
+      for (final h in log.hitTimes) {
+        final double d = (h - mid).abs();
+        if (d < best) {
+          best = d;
+          central = h;
+        }
+      }
+      return [nearest(central)];
+    }
+    return [for (final h in log.hitTimes) nearest(h)];
+  }
+
+  // One line per annotated hit, shown at the top of a log: how the hit compares
+  // to the fastest point of the swing (peak overall paddle speed).
+  List<Widget> _hitStatLines(
+    SavedLog log,
+    SpeedSeries ss,
+    List<int> hitIdxs,
+    int peakIdx,
+  ) {
+    if (hitIdxs.isEmpty || ss.maxTrueFaceSpeed <= 0) return const [];
+    final double peakT = log.t[peakIdx];
+    return [
+      for (final hi in hitIdxs)
+        Padding(
+          padding: const EdgeInsets.fromLTRB(12, 8, 12, 0),
+          child: Text(
+            _hitTimingText(
+              log.t[hi],
+              ss.trueFaceSpeed[hi],
+              ss.maxTrueFaceSpeed,
+              peakT,
+            ),
+            style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
+          ),
+        ),
+    ];
+  }
+
+  // "hit was 90% of peak speed, 18 ms before fastest point".
+  String _hitTimingText(
+    double hitT,
+    double hitSpeed,
+    double peakSpeed,
+    double peakT,
+  ) {
+    final int pct = (hitSpeed / peakSpeed * 100).clamp(0.0, 100.0).round();
+    final double dtMs = (hitT - peakT) * 1000; // < 0 => hit before the peak
+    final int ms = dtMs.abs().round();
+    final String rel = ms == 0
+        ? "at fastest point"
+        : "$ms ms ${dtMs < 0 ? 'before' : 'after'} fastest point";
+    return "hit was $pct% of peak speed, $rel";
   }
 
   Widget _chartSection(

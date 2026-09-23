@@ -331,7 +331,8 @@ mixin _BleScreenCore
             4 + // face-normal presence/count
             (hasFn ? 24 : 0) + // 3 x float64
             4 + // lever-dir presence/count
-            (hasLd ? 24 : 0), // 3 x float64
+            (hasLd ? 24 : 0) + // 3 x float64
+            4, // capture-mode flag (1 = auto, 0 = manual)
       );
       int off = 0;
       bd.setInt32(off, n, Endian.little);
@@ -378,6 +379,9 @@ mixin _BleScreenCore
         bd.setFloat64(off + 16, ld[2], Endian.little);
         off += 24;
       }
+      // Capture mode: 1 = auto-capture, 0 = manual.
+      bd.setInt32(off, log.autoCaptured ? 1 : 0, Endian.little);
+      off += 4;
       await _logFile(dir, log).writeAsBytes(u8, flush: true);
       _refreshLogStorage();
     } catch (_) {
@@ -459,6 +463,12 @@ mixin _BleScreenCore
           ];
           off += 24;
         }
+        // Capture mode (1 = auto). Absent in older logs -> default auto-capture.
+        bool autoCaptured = true;
+        if (off + 4 <= bytes.length) {
+          autoCaptured = bd.getInt32(off, Endian.little) != 0;
+          off += 4;
+        }
         loaded.add(
           SavedLog(
             id,
@@ -472,6 +482,7 @@ mixin _BleScreenCore
             droppedSamples: dropped,
             faceNormal: faceNormal,
             leverDir: leverDir,
+            autoCaptured: autoCaptured,
           ),
         );
         if (id > maxId) maxId = id;
@@ -1270,6 +1281,8 @@ mixin _BleScreenCore
         faceNormal: _faceNormal == null ? null : List<double>.of(_faceNormal!),
         // Freeze the lever direction too, so ω×r face/swing speed stays stable.
         leverDir: _leverDir == null ? null : List<double>.of(_leverDir!),
+        // Auto-capture logs carry one central hit; manual logs may hold several.
+        autoCaptured: _autoLoggingEnabled,
       );
       _logs.insert(0, created);
       _prefs?.setInt(_kLogSeqKey, _logSeq); // remember the last issued number
