@@ -18,13 +18,13 @@ class _ChartPainter extends CustomPainter {
   final double? forcedMax; // if set, hard-cap the y-axis top here (no padding)
   final double?
   minTop; // if set, floor the y-axis top here (keeps auto above it)
-  final String? cornerText; // optional label drawn in the top-right corner
   final bool centerZero; // if true, y-axis is symmetric about 0 (0 centered)
   final List<double> hitTimes; // detected ball-hit times (s) -> vertical lines
   final int? touchIndex; // sample under the finger -> crosshair + dots
   final bool dark; // dark theme -> black plot background + light ink
   final double viewMin; // visible time window (s) — the horizontal zoom span.
   final double viewMax; // Full-range when unzoomed; a sub-span when zoomed in.
+  final int timeDecimals; // decimal places for the x-axis time labels
 
   // Plot insets, shared with InteractiveChart so a touch x maps to the same
   // axis the painter draws.
@@ -37,10 +37,10 @@ class _ChartPainter extends CustomPainter {
     this.colors, {
     required this.viewMin,
     required this.viewMax,
+    this.timeDecimals = 2,
     this.forcedMin,
     this.forcedMax,
     this.minTop,
-    this.cornerText,
     this.centerZero = false,
     this.hitTimes = const [],
     this.touchIndex,
@@ -55,7 +55,6 @@ class _ChartPainter extends CustomPainter {
     final Color gridInk = dark ? Colors.white12 : Colors.black12;
     final Color axisInk = dark ? Colors.white60 : Colors.black54;
     final Color zeroInk = dark ? Colors.white38 : Colors.black38;
-    final Color cornerInk = dark ? Colors.white : Colors.black87;
     final Color faintInk = dark ? Colors.white38 : Colors.black45;
 
     canvas.drawRect(Offset.zero & size, Paint()..color = bg);
@@ -163,20 +162,16 @@ class _ChartPainter extends CustomPainter {
       );
     }
 
-    // Time-label precision adapts to the visible span (span/4 is the tick
-    // spacing), so zoomed-in ticks stay distinct instead of all rounding alike:
-    // 1 dp when wide, 2 dp under ~0.4 s, 3 dp under ~0.2 s. Tuned so a 1.8 s
-    // auto-log reads 1 dp out to 4×, 2 dp at 6–8×, 3 dp at 10×+.
-    final double tSpan = tMax - tMin;
-    final int tDecimals = tSpan > 0.4 ? 1 : (tSpan > 0.2 ? 2 : 3);
-    final double tLabelOffset = 8.0 + (tDecimals - 1) * 2.0; // rough centering
+    // Time-label precision is set by the caller (2 dp default, 3 dp when zoomed
+    // in) so zoomed-in ticks stay distinct instead of all rounding alike.
+    final double tLabelOffset = 8.0 + (timeDecimals - 1) * 2.0; // rough center
     for (int k = 0; k <= 4; k++) {
       final tt = tMin + (tMax - tMin) * k / 4;
       final x = xOf(tt);
       canvas.drawLine(Offset(x, plot.top), Offset(x, plot.bottom), gridPaint);
       _text(
         canvas,
-        tt.toStringAsFixed(tDecimals),
+        tt.toStringAsFixed(timeDecimals),
         Offset(x - tLabelOffset, plot.bottom + 4),
         axisInk,
         size: 9,
@@ -270,22 +265,8 @@ class _ChartPainter extends CustomPainter {
     }
 
     canvas.restore();
-
-    // Optional corner label (e.g. max speed), top-right inside the plot.
-    if (cornerText != null) {
-      final tp = TextPainter(
-        text: TextSpan(
-          text: cornerText,
-          style: TextStyle(
-            color: cornerInk,
-            fontSize: 12,
-            fontWeight: FontWeight.bold,
-          ),
-        ),
-        textDirection: TextDirection.ltr,
-      )..layout();
-      tp.paint(canvas, Offset(plot.right - tp.width - 6, plot.top + 4));
-    }
+    // Note: the at-hit stat label now lives above the chart (in the title row),
+    // rendered by _chartSection — not drawn inside the plot anymore.
   }
 
   void _text(Canvas c, String s, Offset o, Color color, {double size = 10}) {
@@ -307,12 +288,12 @@ class _ChartPainter extends CustomPainter {
       old.forcedMin != forcedMin ||
       old.forcedMax != forcedMax ||
       old.minTop != minTop ||
-      old.cornerText != cornerText ||
       old.centerZero != centerZero ||
       old.hitTimes != hitTimes ||
       old.touchIndex != touchIndex ||
       old.viewMin != viewMin ||
       old.viewMax != viewMax ||
+      old.timeDecimals != timeDecimals ||
       old.dark != dark;
 }
 
@@ -331,7 +312,6 @@ class InteractiveChart extends StatefulWidget {
   final double? forcedMin;
   final double? forcedMax;
   final double? minTop;
-  final String? cornerText;
   final bool centerZero;
   final List<double> hitTimes;
   final bool persist; // keep the readout after the finger lifts
@@ -340,6 +320,7 @@ class InteractiveChart extends StatefulWidget {
   final bool dark; // dark theme -> black plot + light ink
   final double viewMin; // visible time window (s) — horizontal zoom span
   final double viewMax;
+  final int timeDecimals; // decimal places for x-axis time labels
 
   const InteractiveChart({
     super.key,
@@ -353,7 +334,6 @@ class InteractiveChart extends StatefulWidget {
     required this.forcedMin,
     this.forcedMax,
     this.minTop,
-    required this.cornerText,
     required this.centerZero,
     required this.hitTimes,
     required this.persist,
@@ -361,6 +341,7 @@ class InteractiveChart extends StatefulWidget {
     required this.timeLabel,
     required this.viewMin,
     required this.viewMax,
+    this.timeDecimals = 2,
     this.dark = false,
   });
 
@@ -447,12 +428,12 @@ class _InteractiveChartState extends State<InteractiveChart> {
                   forcedMin: widget.forcedMin,
                   forcedMax: widget.forcedMax,
                   minTop: widget.minTop,
-                  cornerText: widget.cornerText,
                   centerZero: widget.centerZero,
                   hitTimes: widget.hitTimes,
                   touchIndex: _touchIndex,
                   viewMin: widget.viewMin,
                   viewMax: widget.viewMax,
+                  timeDecimals: widget.timeDecimals,
                   dark: widget.dark,
                 ),
                 child: const SizedBox.expand(),

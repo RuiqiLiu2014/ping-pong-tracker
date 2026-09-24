@@ -1263,13 +1263,17 @@ mixin _BleScreenUi on _BleScreenCore {
   ) {
     if (hitIdxs.isEmpty || ss.maxTrueFaceSpeed <= 0) return const [];
     final double peakT = log.t[peakIdx];
+    // Number the hits only when there's more than one (i.e. a manual multi-hit
+    // log). A single hit — every auto-capture log, or a one-hit manual log —
+    // reads plain "Hit was …".
+    final bool numbered = hitIdxs.length > 1;
     return [
       for (int k = 0; k < hitIdxs.length; k++)
         Padding(
           padding: const EdgeInsets.fromLTRB(12, 8, 12, 0),
           child: Text(
             _hitTimingText(
-              k + 1,
+              numbered ? k + 1 : null,
               log.t[hitIdxs[k]],
               ss.trueFaceSpeed[hitIdxs[k]],
               ss.maxTrueFaceSpeed,
@@ -1281,9 +1285,10 @@ mixin _BleScreenUi on _BleScreenCore {
     ];
   }
 
-  // "Hit #1 was 90% of peak speed, 18 ms before fastest point".
+  // "Hit was 90% of peak speed, 18 ms before fastest point" — with a "#n" after
+  // "Hit" only when hitNum is non-null (multi-hit manual logs).
   String _hitTimingText(
-    int hitNum,
+    int? hitNum,
     double hitT,
     double hitSpeed,
     double peakSpeed,
@@ -1295,7 +1300,8 @@ mixin _BleScreenUi on _BleScreenCore {
     final String rel = ms == 0
         ? "at fastest point"
         : "$ms ms ${dtMs < 0 ? 'before' : 'after'} fastest point";
-    return "Hit #$hitNum was $pct% of peak speed, $rel";
+    final String label = hitNum == null ? "Hit" : "Hit #$hitNum";
+    return "$label was $pct% of peak speed, $rel";
   }
 
   Widget _chartSection(
@@ -1323,49 +1329,79 @@ mixin _BleScreenUi on _BleScreenCore {
     final double half = (t1 - t0) / 2 / zoom;
     final double viewMin = center - half;
     final double viewMax = center + half;
+    // x-axis time labels: 2 dp normally, 3 dp once zoomed in past 5×.
+    final int timeDecimals = zoom > 5.0 ? 3 : 2;
+    final bool dark = Theme.of(context).brightness == Brightness.dark;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        Padding(
-          padding: const EdgeInsets.fromLTRB(12, 6, 12, 0),
-          child: Row(
-            children: [
-              Flexible(
+        // Title row + chart share a Stack so the at-hit stat can sit top-right
+        // in line with the title and, when it spans multiple hits, bleed down
+        // over the top of the chart (acceptable — it's off to the corner).
+        Stack(
+          clipBehavior: Clip.none,
+          children: [
+            Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(12, 6, 12, 0),
+                  child: Row(
+                    children: [
+                      Flexible(
+                        child: Text(
+                          title,
+                          style: const TextStyle(fontWeight: FontWeight.bold),
+                        ),
+                      ),
+                      if (info != null) _infoIcon(info),
+                    ],
+                  ),
+                ),
+                SizedBox(
+                  height: 150,
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 8),
+                    child: InteractiveChart(
+                      t: log.t,
+                      series: series,
+                      count: log.count,
+                      colors: colors,
+                      labels: labels,
+                      unit: unit,
+                      decimals: decimals,
+                      forcedMin: forcedMin,
+                      forcedMax: forcedMax,
+                      minTop: minTop,
+                      centerZero: centerZero,
+                      hitTimes: log.hitTimes,
+                      persist: _hoverPersists,
+                      pos: _hoverPos,
+                      timeLabel: _fmtTimeLabel,
+                      viewMin: viewMin,
+                      viewMax: viewMax,
+                      timeDecimals: timeDecimals,
+                      dark: dark,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+            if (cornerText != null)
+              Positioned(
+                top: 6,
+                right: 14,
                 child: Text(
-                  title,
-                  style: const TextStyle(fontWeight: FontWeight.bold),
+                  cornerText,
+                  textAlign: TextAlign.right,
+                  style: TextStyle(
+                    fontSize: 12,
+                    fontWeight: FontWeight.bold,
+                    color: dark ? Colors.white : Colors.black87,
+                  ),
                 ),
               ),
-              if (info != null) _infoIcon(info),
-            ],
-          ),
-        ),
-        SizedBox(
-          height: 150,
-          child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 8),
-            child: InteractiveChart(
-              t: log.t,
-              series: series,
-              count: log.count,
-              colors: colors,
-              labels: labels,
-              unit: unit,
-              decimals: decimals,
-              forcedMin: forcedMin,
-              forcedMax: forcedMax,
-              minTop: minTop,
-              cornerText: cornerText,
-              centerZero: centerZero,
-              hitTimes: log.hitTimes,
-              persist: _hoverPersists,
-              pos: _hoverPos,
-              timeLabel: _fmtTimeLabel,
-              viewMin: viewMin,
-              viewMax: viewMax,
-              dark: Theme.of(context).brightness == Brightness.dark,
-            ),
-          ),
+          ],
         ),
         if (labels != null) _legend(colors, labels),
       ],
