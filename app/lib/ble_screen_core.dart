@@ -119,6 +119,10 @@ mixin _BleScreenCore
   final List<SavedLog> _logs = [];
   int _logSeq = 0;
   SavedLog? _selectedLog;
+  // Horizontal zoom for the open log's graphs: an index into _kZoomLevels,
+  // shared by every chart so they stay time-aligned. Always centered on the log
+  // midpoint (where an auto-capture hit sits). Reset to 0 (full) on open.
+  int _logZoomIdx = 0;
   // Total on-disk size (bytes) of the persisted log files; shown at the bottom
   // of Settings. Refreshed whenever logs are loaded, added, or deleted.
   int _logStorageBytes = 0;
@@ -1633,6 +1637,7 @@ mixin _BleScreenCore
       _selectedLog = log;
       _showJumpTop = false;
       _chartsHeight = 0;
+      _logZoomIdx = 0; // every log opens fully zoomed out
     });
     WidgetsBinding.instance.addPostFrameCallback((_) => _measureCharts());
   }

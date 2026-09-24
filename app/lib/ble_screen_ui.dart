@@ -1,5 +1,9 @@
 part of 'main.dart';
 
+// Horizontal-zoom ladder for the log-detail graphs (1× = full window). Discrete
+// steps keep the ×-label clean; the view is always centered on the log midpoint.
+const List<double> _kZoomLevels = [1.0, 2.0, 3.0, 4.0, 6.0, 8.0, 10.0, 12.0, 16.0];
+
 // All widget builders for the paddle screen (Connection / Logs / Settings
 // tabs, log detail, dialogs). State + logic live in ble_screen_core.dart.
 mixin _BleScreenUi on _BleScreenCore {
@@ -796,6 +800,7 @@ mixin _BleScreenUi on _BleScreenCore {
             ],
           ),
         ),
+        _zoomBar(),
         Expanded(
           child: Stack(
             children: [
@@ -834,6 +839,57 @@ mixin _BleScreenUi on _BleScreenCore {
           ),
         ),
       ],
+    );
+  }
+
+  // Always-visible zoom control for the open log's graphs. Horizontal zoom only,
+  // centered on the log midpoint; shared across every chart. Pan is deliberately
+  // out of scope here (a later step decides two-finger vs scrollbar).
+  Widget _zoomBar() {
+    final int idx = _logZoomIdx;
+    final double z = _kZoomLevels[idx];
+    final bool atMin = idx == 0;
+    final bool atMax = idx == _kZoomLevels.length - 1;
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(8, 0, 8, 2),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          const Text(
+            "Zoom",
+            style: TextStyle(fontSize: 12, color: Colors.grey),
+          ),
+          IconButton(
+            iconSize: 22,
+            visualDensity: VisualDensity.compact,
+            tooltip: "Zoom out",
+            onPressed: atMin ? null : () => setState(() => _logZoomIdx--),
+            icon: const Icon(Icons.remove_circle_outline),
+          ),
+          SizedBox(
+            width: 42,
+            child: Text(
+              "${z.toStringAsFixed(z % 1 == 0 ? 0 : 1)}×",
+              textAlign: TextAlign.center,
+              style: const TextStyle(fontWeight: FontWeight.bold),
+            ),
+          ),
+          IconButton(
+            iconSize: 22,
+            visualDensity: VisualDensity.compact,
+            tooltip: "Zoom in",
+            onPressed: atMax ? null : () => setState(() => _logZoomIdx++),
+            icon: const Icon(Icons.add_circle_outline),
+          ),
+          IconButton(
+            iconSize: 20,
+            visualDensity: VisualDensity.compact,
+            tooltip: "Reset zoom",
+            onPressed: atMin ? null : () => setState(() => _logZoomIdx = 0),
+            icon: const Icon(Icons.refresh),
+          ),
+        ],
+      ),
     );
   }
 
@@ -1257,6 +1313,16 @@ mixin _BleScreenUi on _BleScreenCore {
     int decimals = 2,
     String? info,
   }) {
+    // Shared horizontal zoom: a sub-window centered on the log midpoint (the
+    // hit, for auto-capture). Every chart uses the same window, so they stay
+    // time-aligned. 1× spans the whole log.
+    final double t0 = log.t[0];
+    final double t1 = log.count > 1 ? log.t[log.count - 1] : t0 + 1e-3;
+    final double zoom = _kZoomLevels[_logZoomIdx];
+    final double center = (t0 + t1) / 2;
+    final double half = (t1 - t0) / 2 / zoom;
+    final double viewMin = center - half;
+    final double viewMax = center + half;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
@@ -1295,6 +1361,8 @@ mixin _BleScreenUi on _BleScreenCore {
               persist: _hoverPersists,
               pos: _hoverPos,
               timeLabel: _fmtTimeLabel,
+              viewMin: viewMin,
+              viewMax: viewMax,
               dark: Theme.of(context).brightness == Brightness.dark,
             ),
           ),

@@ -23,6 +23,8 @@ class _ChartPainter extends CustomPainter {
   final List<double> hitTimes; // detected ball-hit times (s) -> vertical lines
   final int? touchIndex; // sample under the finger -> crosshair + dots
   final bool dark; // dark theme -> black plot background + light ink
+  final double viewMin; // visible time window (s) — the horizontal zoom span.
+  final double viewMax; // Full-range when unzoomed; a sub-span when zoomed in.
 
   // Plot insets, shared with InteractiveChart so a touch x maps to the same
   // axis the painter draws.
@@ -33,6 +35,8 @@ class _ChartPainter extends CustomPainter {
     this.series,
     this.count,
     this.colors, {
+    required this.viewMin,
+    required this.viewMax,
     this.forcedMin,
     this.forcedMax,
     this.minTop,
@@ -75,17 +79,19 @@ class _ChartPainter extends CustomPainter {
       return;
     }
 
-    double tMin = t[0];
-    double tMax = t[count - 1];
+    // X axis = the visible (possibly zoomed) window. Y still scans the WHOLE
+    // series, so the vertical scale stays fixed while zooming horizontally.
+    double tMin = viewMin;
+    double tMax = viewMax;
     if (tMax <= tMin) tMax = tMin + 1e-3;
 
     const int maxPts = 800;
-    final int step = (count / maxPts).ceil().clamp(1, count);
+    final int yStep = (count / maxPts).ceil().clamp(1, count);
 
     double vMin = double.infinity, vMax = -double.infinity;
     for (int a = 0; a < series.length; a++) {
       final col = series[a];
-      for (int i = 0; i < count; i += step) {
+      for (int i = 0; i < count; i += yStep) {
         final v = col[i];
         if (v < vMin) vMin = v;
         if (v > vMax) vMax = v;
@@ -157,18 +163,47 @@ class _ChartPainter extends CustomPainter {
       );
     }
 
+    // Time-label precision adapts to the visible span (span/4 is the tick
+    // spacing), so zoomed-in ticks stay distinct instead of all rounding alike:
+    // 1 dp when wide, 2 dp under ~0.4 s, 3 dp under ~0.2 s. Tuned so a 1.8 s
+    // auto-log reads 1 dp out to 4×, 2 dp at 6–8×, 3 dp at 10×+.
+    final double tSpan = tMax - tMin;
+    final int tDecimals = tSpan > 0.4 ? 1 : (tSpan > 0.2 ? 2 : 3);
+    final double tLabelOffset = 8.0 + (tDecimals - 1) * 2.0; // rough centering
     for (int k = 0; k <= 4; k++) {
       final tt = tMin + (tMax - tMin) * k / 4;
       final x = xOf(tt);
       canvas.drawLine(Offset(x, plot.top), Offset(x, plot.bottom), gridPaint);
       _text(
         canvas,
-        tt.toStringAsFixed(1),
-        Offset(x - 8, plot.bottom + 4),
+        tt.toStringAsFixed(tDecimals),
+        Offset(x - tLabelOffset, plot.bottom + 4),
         axisInk,
         size: 9,
       );
     }
+
+    // Visible sample range, so the path is decimated over just the window that's
+    // shown — zooming in reveals real per-sample detail instead of the same 800
+    // points stretched. One neighbour past each edge keeps the line entering and
+    // leaving cleanly (clipped to the plot below).
+    int drawLo = 0;
+    while (drawLo < count - 1 && t[drawLo] < tMin) {
+      drawLo++;
+    }
+    int drawHi = count - 1;
+    while (drawHi > 0 && t[drawHi] > tMax) {
+      drawHi--;
+    }
+    drawLo = (drawLo - 1).clamp(0, count - 1);
+    drawHi = (drawHi + 1).clamp(0, count - 1);
+    final int visN = (drawHi - drawLo + 1).clamp(1, count);
+    final int step = (visN / maxPts).ceil().clamp(1, count);
+
+    // Clip the data (traces, hit lines, crosshair) to the plot so zoomed-out
+    // samples can't overrun the axis labels/border. Grid + labels stay unclipped.
+    canvas.save();
+    canvas.clipRect(plot);
 
     for (int a = 0; a < series.length; a++) {
       final col = series[a];
@@ -179,7 +214,8 @@ class _ChartPainter extends CustomPainter {
         ..isAntiAlias = true;
       final path = Path();
       bool first = true;
-      for (int i = 0; i < count; i += step) {
+      int last = drawLo;
+      for (int i = drawLo; i <= drawHi; i += step) {
         final x = xOf(t[i]);
         final y = yOf(col[i]);
         if (first) {
@@ -188,7 +224,9 @@ class _ChartPainter extends CustomPainter {
         } else {
           path.lineTo(x, y);
         }
+        last = i;
       }
+      if (last != drawHi) path.lineTo(xOf(t[drawHi]), yOf(col[drawHi]));
       canvas.drawPath(path, paint);
     }
 
@@ -231,6 +269,8 @@ class _ChartPainter extends CustomPainter {
       }
     }
 
+    canvas.restore();
+
     // Optional corner label (e.g. max speed), top-right inside the plot.
     if (cornerText != null) {
       final tp = TextPainter(
@@ -271,6 +311,8 @@ class _ChartPainter extends CustomPainter {
       old.centerZero != centerZero ||
       old.hitTimes != hitTimes ||
       old.touchIndex != touchIndex ||
+      old.viewMin != viewMin ||
+      old.viewMax != viewMax ||
       old.dark != dark;
 }
 
@@ -296,6 +338,8 @@ class InteractiveChart extends StatefulWidget {
   final HoverReadoutPos pos; // which side the readout box sits on
   final String Function(double) timeLabel; // formats a sample time for readout
   final bool dark; // dark theme -> black plot + light ink
+  final double viewMin; // visible time window (s) — horizontal zoom span
+  final double viewMax;
 
   const InteractiveChart({
     super.key,
@@ -315,6 +359,8 @@ class InteractiveChart extends StatefulWidget {
     required this.persist,
     required this.pos,
     required this.timeLabel,
+    required this.viewMin,
+    required this.viewMax,
     this.dark = false,
   });
 
@@ -325,7 +371,8 @@ class InteractiveChart extends StatefulWidget {
 class _InteractiveChartState extends State<InteractiveChart> {
   int? _touchIndex;
 
-  // Map an x within the plot to the nearest sample index (samples are ~uniform).
+  // Map an x within the plot to the nearest sample by TIME, so scrubbing lands
+  // correctly whether zoomed out (full range) or zoomed into a sub-window.
   void _updateFromX(double dx, double width) {
     final int n = widget.count;
     if (n < 2) return;
@@ -333,8 +380,27 @@ class _InteractiveChartState extends State<InteractiveChart> {
     final double plotW = width - _ChartPainter.padR - plotLeft;
     if (plotW <= 0) return;
     final double frac = ((dx - plotLeft) / plotW).clamp(0.0, 1.0);
-    final int idx = (frac * (n - 1)).round().clamp(0, n - 1);
+    final double tt = widget.viewMin + frac * (widget.viewMax - widget.viewMin);
+    final int idx = _nearestIndex(tt);
     if (idx != _touchIndex) setState(() => _touchIndex = idx);
+  }
+
+  // Nearest sample index to a time (binary search; t is sorted ascending).
+  int _nearestIndex(double tt) {
+    final t = widget.t;
+    final int n = widget.count;
+    if (tt <= t[0]) return 0;
+    if (tt >= t[n - 1]) return n - 1;
+    int lo = 0, hi = n - 1;
+    while (hi - lo > 1) {
+      final int mid = (lo + hi) >> 1;
+      if (t[mid] < tt) {
+        lo = mid;
+      } else {
+        hi = mid;
+      }
+    }
+    return (tt - t[lo]) <= (t[hi] - tt) ? lo : hi;
   }
 
   void _clear() {
@@ -385,6 +451,8 @@ class _InteractiveChartState extends State<InteractiveChart> {
                   centerZero: widget.centerZero,
                   hitTimes: widget.hitTimes,
                   touchIndex: _touchIndex,
+                  viewMin: widget.viewMin,
+                  viewMax: widget.viewMax,
                   dark: widget.dark,
                 ),
                 child: const SizedBox.expand(),
@@ -472,9 +540,9 @@ class _InteractiveChartState extends State<InteractiveChart> {
     // Follow mode: the box tracks the crosshair's x, centered above it and
     // clamped to the chart by Align (it never runs off either edge).
     if (widget.pos == HoverReadoutPos.follow) {
-      final double tMin = widget.t[0];
-      final double tMax = widget.count > 1
-          ? widget.t[widget.count - 1]
+      final double tMin = widget.viewMin;
+      final double tMax = widget.viewMax > widget.viewMin
+          ? widget.viewMax
           : tMin + 1e-3;
       final double denom = (tMax - tMin).abs() < 1e-9 ? 1e-3 : (tMax - tMin);
       final double plotLeft = _ChartPainter.padL;
