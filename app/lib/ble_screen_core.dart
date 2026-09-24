@@ -1640,10 +1640,56 @@ mixin _BleScreenCore
       _selectedLog = log;
       _showJumpTop = false;
       _chartsHeight = 0;
-      _logZoomIdx = 0; // every log opens fully zoomed out...
-      _logPanSec = 0.0; // ...and centered
+      // Zoom + pan persist across logs (opening from the list or the < > arrows);
+      // just re-fit the pan offset to this log's length.
+      _clampLogPan();
     });
     WidgetsBinding.instance.addPostFrameCallback((_) => _measureCharts());
+  }
+
+  // Step to the previous (-1, newer) or next (+1, older) log in the list, keeping
+  // the current zoom, pan, and scroll position. Pan is re-clamped to the new
+  // log's length. No-op past either end.
+  void _gotoAdjacentLog(int dir) {
+    final cur = _selectedLog;
+    if (cur == null) return;
+    final int idx = _logs.indexWhere((l) => l.id == cur.id);
+    final int ni = idx + dir;
+    if (idx < 0 || ni < 0 || ni >= _logs.length) return;
+    setState(() {
+      _selectedLog = _logs[ni];
+      _clampLogPan();
+    });
+    // Keep the same scroll offset; just refresh the charts-height threshold.
+    WidgetsBinding.instance.addPostFrameCallback((_) => _measureCharts());
+  }
+
+  // Two-finger pan callback from a chart: shift the shared zoom window by a pixel
+  // delta of the fingers' centroid. Content follows the fingers (drag right ->
+  // earlier time), converting px -> seconds via the visible span.
+  void _panLogByPixels(double dxFocalPx, double plotW) {
+    final log = _selectedLog;
+    if (log == null || log.count < 2 || plotW <= 0) return;
+    final double span =
+        (log.t[log.count - 1] - log.t[0]) / _kZoomLevels[_logZoomIdx];
+    setState(() {
+      _logPanSec -= dxFocalPx / plotW * span;
+      _clampLogPan();
+    });
+  }
+
+  // Keep the pan offset within the range where the zoom window still fits inside
+  // the log (so panning can't reveal empty space past either end).
+  void _clampLogPan() {
+    final log = _selectedLog;
+    if (log == null || log.count < 2) {
+      _logPanSec = 0.0;
+      return;
+    }
+    final double halfLog = (log.t[log.count - 1] - log.t[0]) / 2;
+    final double half = halfLog / _kZoomLevels[_logZoomIdx];
+    final double maxOff = halfLog - half;
+    _logPanSec = maxOff <= 0 ? 0.0 : _logPanSec.clamp(-maxOff, maxOff);
   }
 
   // Cache the rendered height of the charts block (item 0) while it's on screen.

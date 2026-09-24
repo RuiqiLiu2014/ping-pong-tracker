@@ -779,6 +779,11 @@ mixin _BleScreenUi on _BleScreenCore {
         leverDir: log.leverDir,
       ),
     );
+    // Position in the (newest-first) list, for the < > adjacent-log arrows.
+    final int logIdx = _logs.indexWhere((l) => l.id == log.id);
+    final bool hasNewer = logIdx > 0; // earlier in the list = more recent
+    final bool hasOlder = logIdx >= 0 && logIdx < _logs.length - 1;
+    final Color arrowInk = Theme.of(context).colorScheme.onSurface;
     // Fixed back/title/actions bar, then one lazy list holding the charts
     // (velocity on top) followed by the CSV rows, so everything scrolls
     // together while the rows stay lazily built.
@@ -794,15 +799,41 @@ mixin _BleScreenUi on _BleScreenCore {
                 icon: const Icon(Icons.arrow_back),
                 onPressed: () => setState(() => _selectedLog = null),
               ),
+              // Centered "‹ Log N • 1.8 s ›" — arrows step to the adjacent log
+              // (grey at the ends); tap the title to rename.
               Expanded(
-                // Tap the title to rename.
-                child: InkWell(
-                  onTap: () => _renameLog(log),
-                  child: Text(
-                    "${log.displayName}  •  "
-                    "${log.durationSec.toStringAsFixed(1)} s",
-                    style: const TextStyle(fontWeight: FontWeight.bold),
-                  ),
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    IconButton(
+                      iconSize: 24,
+                      visualDensity: VisualDensity.compact,
+                      color: arrowInk,
+                      tooltip: "Newer log",
+                      onPressed: hasNewer ? () => _gotoAdjacentLog(-1) : null,
+                      icon: const Icon(Icons.chevron_left),
+                    ),
+                    Flexible(
+                      child: InkWell(
+                        onTap: () => _renameLog(log),
+                        child: Text(
+                          "${log.displayName}  •  "
+                          "${log.durationSec.toStringAsFixed(1)} s",
+                          textAlign: TextAlign.center,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(fontWeight: FontWeight.bold),
+                        ),
+                      ),
+                    ),
+                    IconButton(
+                      iconSize: 24,
+                      visualDensity: VisualDensity.compact,
+                      color: arrowInk,
+                      tooltip: "Older log",
+                      onPressed: hasOlder ? () => _gotoAdjacentLog(1) : null,
+                      icon: const Icon(Icons.chevron_right),
+                    ),
+                  ],
                 ),
               ),
               if (log.droppedSamples > 0) _dropBadge(log.droppedSamples),
@@ -911,34 +942,6 @@ mixin _BleScreenUi on _BleScreenCore {
         ],
       ),
     );
-  }
-
-  // Two-finger pan callback from a chart: shift the shared zoom window by a
-  // pixel delta of the fingers' centroid. Content follows the fingers (drag
-  // right -> earlier time), converting px -> seconds via the visible span.
-  void _panLogByPixels(double dxFocalPx, double plotW) {
-    final log = _selectedLog;
-    if (log == null || log.count < 2 || plotW <= 0) return;
-    final double span =
-        (log.t[log.count - 1] - log.t[0]) / _kZoomLevels[_logZoomIdx];
-    setState(() {
-      _logPanSec -= dxFocalPx / plotW * span;
-      _clampLogPan();
-    });
-  }
-
-  // Keep the pan offset within the range where the zoom window still fits inside
-  // the log (so panning can't reveal empty space past either end).
-  void _clampLogPan() {
-    final log = _selectedLog;
-    if (log == null || log.count < 2) {
-      _logPanSec = 0.0;
-      return;
-    }
-    final double halfLog = (log.t[log.count - 1] - log.t[0]) / 2;
-    final double half = halfLog / _kZoomLevels[_logZoomIdx];
-    final double maxOff = halfLog - half;
-    _logPanSec = maxOff <= 0 ? 0.0 : _logPanSec.clamp(-maxOff, maxOff);
   }
 
   Widget _logCharts(SavedLog log, SpeedSeries ss) {
