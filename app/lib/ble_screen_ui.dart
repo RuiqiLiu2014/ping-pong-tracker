@@ -2,7 +2,17 @@ part of 'main.dart';
 
 // Horizontal-zoom ladder for the log-detail graphs (1× = full window). Discrete
 // steps keep the ×-label clean; the view is always centered on the log midpoint.
-const List<double> _kZoomLevels = [1.0, 2.0, 3.0, 4.0, 6.0, 8.0, 10.0, 12.0, 16.0];
+const List<double> _kZoomLevels = [
+  1.0,
+  2.0,
+  3.0,
+  4.0,
+  6.0,
+  8.0,
+  10.0,
+  12.0,
+  16.0,
+];
 
 // All widget builders for the paddle screen (Connection / Logs / Settings
 // tabs, log detail, dialogs). State + logic live in ble_screen_core.dart.
@@ -863,7 +873,12 @@ mixin _BleScreenUi on _BleScreenCore {
             iconSize: 22,
             visualDensity: VisualDensity.compact,
             tooltip: "Zoom out",
-            onPressed: atMin ? null : () => setState(() => _logZoomIdx--),
+            onPressed: atMin
+                ? null
+                : () => setState(() {
+                    _logZoomIdx--;
+                    _clampLogPan(); // less zoom -> less pan room
+                  }),
             icon: const Icon(Icons.remove_circle_outline),
           ),
           SizedBox(
@@ -885,12 +900,45 @@ mixin _BleScreenUi on _BleScreenCore {
             iconSize: 20,
             visualDensity: VisualDensity.compact,
             tooltip: "Reset zoom",
-            onPressed: atMin ? null : () => setState(() => _logZoomIdx = 0),
+            onPressed: (atMin && _logPanSec == 0)
+                ? null
+                : () => setState(() {
+                    _logZoomIdx = 0;
+                    _logPanSec = 0.0; // reset recenters too
+                  }),
             icon: const Icon(Icons.refresh),
           ),
         ],
       ),
     );
+  }
+
+  // Two-finger pan callback from a chart: shift the shared zoom window by a
+  // pixel delta of the fingers' centroid. Content follows the fingers (drag
+  // right -> earlier time), converting px -> seconds via the visible span.
+  void _panLogByPixels(double dxFocalPx, double plotW) {
+    final log = _selectedLog;
+    if (log == null || log.count < 2 || plotW <= 0) return;
+    final double span =
+        (log.t[log.count - 1] - log.t[0]) / _kZoomLevels[_logZoomIdx];
+    setState(() {
+      _logPanSec -= dxFocalPx / plotW * span;
+      _clampLogPan();
+    });
+  }
+
+  // Keep the pan offset within the range where the zoom window still fits inside
+  // the log (so panning can't reveal empty space past either end).
+  void _clampLogPan() {
+    final log = _selectedLog;
+    if (log == null || log.count < 2) {
+      _logPanSec = 0.0;
+      return;
+    }
+    final double halfLog = (log.t[log.count - 1] - log.t[0]) / 2;
+    final double half = halfLog / _kZoomLevels[_logZoomIdx];
+    final double maxOff = halfLog - half;
+    _logPanSec = maxOff <= 0 ? 0.0 : _logPanSec.clamp(-maxOff, maxOff);
   }
 
   Widget _logCharts(SavedLog log, SpeedSeries ss) {
@@ -1319,14 +1367,17 @@ mixin _BleScreenUi on _BleScreenCore {
     int decimals = 2,
     String? info,
   }) {
-    // Shared horizontal zoom: a sub-window centered on the log midpoint (the
-    // hit, for auto-capture). Every chart uses the same window, so they stay
-    // time-aligned. 1× spans the whole log.
+    // Shared horizontal zoom: a sub-window into the log. 1× spans the whole log;
+    // when zoomed it starts centered on the midpoint (the hit, for auto-capture)
+    // and two-finger pan shifts it via _logPanSec. Every chart uses the same
+    // window, so they stay time-aligned.
     final double t0 = log.t[0];
     final double t1 = log.count > 1 ? log.t[log.count - 1] : t0 + 1e-3;
     final double zoom = _kZoomLevels[_logZoomIdx];
-    final double center = (t0 + t1) / 2;
     final double half = (t1 - t0) / 2 / zoom;
+    final double maxOff = (t1 - t0) / 2 - half; // pan room each side of center
+    final double panOff = maxOff <= 0 ? 0.0 : _logPanSec.clamp(-maxOff, maxOff);
+    final double center = (t0 + t1) / 2 + panOff;
     final double viewMin = center - half;
     final double viewMax = center + half;
     // x-axis time labels: 2 dp normally, 3 dp once zoomed in past 5×.
@@ -1381,6 +1432,7 @@ mixin _BleScreenUi on _BleScreenCore {
                       viewMin: viewMin,
                       viewMax: viewMax,
                       timeDecimals: timeDecimals,
+                      onPan: _logZoomIdx == 0 ? null : _panLogByPixels,
                       dark: dark,
                     ),
                   ),

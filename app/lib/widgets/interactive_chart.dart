@@ -321,6 +321,10 @@ class InteractiveChart extends StatefulWidget {
   final double viewMin; // visible time window (s) — horizontal zoom span
   final double viewMax;
   final int timeDecimals; // decimal places for x-axis time labels
+  // Two-finger horizontal pan: called with the frame-to-frame change in the
+  // pointers' focal (centroid) x, in pixels, plus the plot's pixel width. Null
+  // disables panning (e.g. when unzoomed). The parent maps px -> time.
+  final void Function(double dxFocalPx, double plotW)? onPan;
 
   const InteractiveChart({
     super.key,
@@ -342,6 +346,7 @@ class InteractiveChart extends StatefulWidget {
     required this.viewMin,
     required this.viewMax,
     this.timeDecimals = 2,
+    this.onPan,
     this.dark = false,
   });
 
@@ -352,9 +357,54 @@ class InteractiveChart extends StatefulWidget {
 class _InteractiveChartState extends State<InteractiveChart> {
   int? _touchIndex;
 
+  // Active pointers (id -> local x) for two-finger pan, plus the last centroid
+  // x so we pan by frame-to-frame deltas. Two+ fingers = pan mode.
+  final Map<int, double> _pointerX = {};
+  double? _lastFocalX;
+  bool get _twoFinger => _pointerX.length >= 2;
+
+  double _focalX() {
+    double s = 0;
+    for (final x in _pointerX.values) {
+      s += x;
+    }
+    return s / _pointerX.length;
+  }
+
+  void _onPointerDown(PointerDownEvent e) {
+    _pointerX[e.pointer] = e.localPosition.dx;
+    if (_twoFinger) {
+      // Re-anchor (no pan this frame) so adding a finger doesn't lurch the view
+      // when the centroid jumps; and drop any scrub crosshair.
+      _lastFocalX = _focalX();
+      if (_touchIndex != null) setState(() => _touchIndex = null);
+    }
+  }
+
+  void _onPointerMove(PointerMoveEvent e, double width) {
+    if (!_pointerX.containsKey(e.pointer)) return;
+    _pointerX[e.pointer] = e.localPosition.dx;
+    if (!_twoFinger || _lastFocalX == null || widget.onPan == null) return;
+    final double fx = _focalX();
+    final double dx = fx - _lastFocalX!;
+    _lastFocalX = fx;
+    if (dx != 0) {
+      final double plotW = width - _ChartPainter.padR - _ChartPainter.padL;
+      widget.onPan!(dx, plotW);
+    }
+  }
+
+  void _onPointerEnd(PointerEvent e) {
+    if (_pointerX.remove(e.pointer) == null) return;
+    // Re-anchor to the surviving centroid (no pan) so removing a finger doesn't
+    // lurch; leave pan mode once fewer than two remain.
+    _lastFocalX = _twoFinger ? _focalX() : null;
+  }
+
   // Map an x within the plot to the nearest sample by TIME, so scrubbing lands
   // correctly whether zoomed out (full range) or zoomed into a sub-window.
   void _updateFromX(double dx, double width) {
+    if (_twoFinger) return; // two-finger pan owns the gesture; don't scrub
     final int n = widget.count;
     if (n < 2) return;
     final double plotLeft = _ChartPainter.padL;
@@ -405,41 +455,53 @@ class _InteractiveChartState extends State<InteractiveChart> {
     return LayoutBuilder(
       builder: (context, constraints) {
         final double width = constraints.maxWidth;
-        return GestureDetector(
-          behavior: HitTestBehavior.opaque,
-          // Horizontal drag = scrub; long-press = pin. Vertical drags are left
-          // to the scroll view (neither recognizer claims them).
-          onHorizontalDragStart: (d) => _updateFromX(d.localPosition.dx, width),
-          onHorizontalDragUpdate: (d) =>
-              _updateFromX(d.localPosition.dx, width),
-          onHorizontalDragEnd: (_) => _onEnd(),
-          onHorizontalDragCancel: _onEnd,
-          onLongPressStart: (d) => _updateFromX(d.localPosition.dx, width),
-          onLongPressMoveUpdate: (d) => _updateFromX(d.localPosition.dx, width),
-          onLongPressEnd: (_) => _onEnd(),
-          child: Stack(
-            children: [
-              CustomPaint(
-                painter: _ChartPainter(
-                  widget.t,
-                  widget.series,
-                  widget.count,
-                  widget.colors,
-                  forcedMin: widget.forcedMin,
-                  forcedMax: widget.forcedMax,
-                  minTop: widget.minTop,
-                  centerZero: widget.centerZero,
-                  hitTimes: widget.hitTimes,
-                  touchIndex: _touchIndex,
-                  viewMin: widget.viewMin,
-                  viewMax: widget.viewMax,
-                  timeDecimals: widget.timeDecimals,
-                  dark: widget.dark,
+        // Listener runs alongside the arena (it never claims the gesture), so it
+        // tracks all fingers for two-finger pan without disturbing the scrub /
+        // page-scroll recognizers below.
+        return Listener(
+          onPointerDown: _onPointerDown,
+          onPointerMove: (e) => _onPointerMove(e, width),
+          onPointerUp: _onPointerEnd,
+          onPointerCancel: _onPointerEnd,
+          child: GestureDetector(
+            behavior: HitTestBehavior.opaque,
+            // Horizontal drag = scrub; long-press = pin. Vertical drags are left
+            // to the scroll view (neither recognizer claims them). Two-finger
+            // pan is handled by the Listener above (scrub self-suppresses then).
+            onHorizontalDragStart: (d) =>
+                _updateFromX(d.localPosition.dx, width),
+            onHorizontalDragUpdate: (d) =>
+                _updateFromX(d.localPosition.dx, width),
+            onHorizontalDragEnd: (_) => _onEnd(),
+            onHorizontalDragCancel: _onEnd,
+            onLongPressStart: (d) => _updateFromX(d.localPosition.dx, width),
+            onLongPressMoveUpdate: (d) =>
+                _updateFromX(d.localPosition.dx, width),
+            onLongPressEnd: (_) => _onEnd(),
+            child: Stack(
+              children: [
+                CustomPaint(
+                  painter: _ChartPainter(
+                    widget.t,
+                    widget.series,
+                    widget.count,
+                    widget.colors,
+                    forcedMin: widget.forcedMin,
+                    forcedMax: widget.forcedMax,
+                    minTop: widget.minTop,
+                    centerZero: widget.centerZero,
+                    hitTimes: widget.hitTimes,
+                    touchIndex: _touchIndex,
+                    viewMin: widget.viewMin,
+                    viewMax: widget.viewMax,
+                    timeDecimals: widget.timeDecimals,
+                    dark: widget.dark,
+                  ),
+                  child: const SizedBox.expand(),
                 ),
-                child: const SizedBox.expand(),
-              ),
-              if (_touchIndex != null) _readout(width),
-            ],
+                if (_touchIndex != null) _readout(width),
+              ],
+            ),
           ),
         );
       },
