@@ -84,7 +84,7 @@ class _ChartPainter extends CustomPainter {
     double tMax = viewMax;
     if (tMax <= tMin) tMax = tMin + 1e-3;
 
-    const int maxPts = 800;
+    const int maxPts = 1600;
     final int yStep = (count / maxPts).ceil().clamp(1, count);
 
     double vMin = double.infinity, vMax = -double.infinity;
@@ -178,22 +178,34 @@ class _ChartPainter extends CustomPainter {
       );
     }
 
-    // Visible sample range, so the path is decimated over just the window that's
-    // shown — zooming in reveals real per-sample detail instead of the same 800
-    // points stretched. One neighbour past each edge keeps the line entering and
-    // leaving cleanly (clipped to the plot below).
-    int drawLo = 0;
-    while (drawLo < count - 1 && t[drawLo] < tMin) {
-      drawLo++;
+    // Decimate the trace over just the visible window (so zooming in reveals real
+    // per-sample detail), but do it STABLY so panning doesn't flicker. Two rules:
+    //  1) derive `step` from the visible SPAN fraction — constant while panning,
+    //     since only the center moves — so it never flips between two values
+    //     frame-to-frame;
+    //  2) snap the drawn samples to a fixed grid (multiples of `step`), so sliding
+    //     the window doesn't swap WHICH samples are plotted. Swapping the subset
+    //     aliases a high-frequency trace and looks like rapid flashing; with the
+    //     grid fixed, points only enter/leave at the edges.
+    int lo = 0;
+    while (lo < count - 1 && t[lo] < tMin) {
+      lo++;
     }
-    int drawHi = count - 1;
-    while (drawHi > 0 && t[drawHi] > tMax) {
-      drawHi--;
+    int hi = count - 1;
+    while (hi > 0 && t[hi] > tMax) {
+      hi--;
     }
-    drawLo = (drawLo - 1).clamp(0, count - 1);
-    drawHi = (drawHi + 1).clamp(0, count - 1);
-    final int visN = (drawHi - drawLo + 1).clamp(1, count);
-    final int step = (visN / maxPts).ceil().clamp(1, count);
+    final double fullSpan = t[count - 1] - t[0];
+    final double visFrac = fullSpan > 0
+        ? ((tMax - tMin) / fullSpan).clamp(0.0, 1.0)
+        : 1.0;
+    final int approxVisN = (count * visFrac).ceil().clamp(1, count);
+    final int step = (approxVisN / maxPts).ceil().clamp(1, count);
+    // Pad by a full step each side so the fixed grid still covers the plot edges
+    // (overflow is clipped below); snap the start to the grid.
+    final int drawLo = (lo - step).clamp(0, count - 1);
+    final int drawHi = (hi + step).clamp(0, count - 1);
+    final int startI = ((drawLo + step - 1) ~/ step) * step;
 
     // Clip the data (traces, hit lines, crosshair) to the plot so zoomed-out
     // samples can't overrun the axis labels/border. Grid + labels stay unclipped.
@@ -209,8 +221,7 @@ class _ChartPainter extends CustomPainter {
         ..isAntiAlias = true;
       final path = Path();
       bool first = true;
-      int last = drawLo;
-      for (int i = drawLo; i <= drawHi; i += step) {
+      for (int i = startI; i <= drawHi; i += step) {
         final x = xOf(t[i]);
         final y = yOf(col[i]);
         if (first) {
@@ -219,9 +230,7 @@ class _ChartPainter extends CustomPainter {
         } else {
           path.lineTo(x, y);
         }
-        last = i;
       }
-      if (last != drawHi) path.lineTo(xOf(t[drawHi]), yOf(col[drawHi]));
       canvas.drawPath(path, paint);
     }
 

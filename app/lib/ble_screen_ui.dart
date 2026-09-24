@@ -14,6 +14,10 @@ const List<double> _kZoomLevels = [
   16.0,
 ];
 
+// Fixed width of the dropped-samples indicator slot in the log-detail header, so
+// the centered title doesn't shift when the indicator shows/hides.
+const double _kDropSlotW = 40.0;
+
 // All widget builders for the paddle screen (Connection / Logs / Settings
 // tabs, log detail, dialogs). State + logic live in ble_screen_core.dart.
 mixin _BleScreenUi on _BleScreenCore {
@@ -703,19 +707,29 @@ mixin _BleScreenUi on _BleScreenCore {
   }
 
   // Red "dropped N sample(s)" badge for a log that lost BLE data mid-capture.
-  Widget _dropBadge(int n) {
-    return Padding(
-      padding: const EdgeInsets.only(right: 4),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          const Icon(Icons.error, color: Colors.red, size: 18),
-          const SizedBox(width: 4),
-          Text(
-            "dropped $n sample${n == 1 ? '' : 's'}",
-            style: const TextStyle(color: Colors.red, fontSize: 12),
-          ),
-        ],
+  // Fixed-width dropped-samples slot for the log-detail header. When samples were
+  // dropped it's a red "!" that opens a left-pointing popup (like the graph info
+  // bubbles); otherwise it's empty space of the same width so the centered title
+  // never shifts.
+  Widget _dropIndicator(SavedLog log) {
+    final int n = log.droppedSamples;
+    if (n == 0) return const SizedBox(width: _kDropSlotW);
+    final String msg =
+        "$n sample${n == 1 ? '' : 's'} dropped during this capture (lost over "
+        "Bluetooth). The graphs bridge each gap with a straight line, so timing "
+        "right around a gap may be slightly off.";
+    return SizedBox(
+      width: _kDropSlotW,
+      child: Builder(
+        builder: (iconCtx) => IconButton(
+          iconSize: 22,
+          visualDensity: VisualDensity.compact,
+          padding: EdgeInsets.zero,
+          color: Colors.red,
+          tooltip: "Dropped samples",
+          icon: const Icon(Icons.error_outline),
+          onPressed: () => _toggleInfoBubble(iconCtx, msg, toLeft: true),
+        ),
       ),
     );
   }
@@ -799,6 +813,10 @@ mixin _BleScreenUi on _BleScreenCore {
                 icon: const Icon(Icons.arrow_back),
                 onPressed: () => setState(() => _selectedLog = null),
               ),
+              // Reserve the drop-slot width on the left too, so the centered
+              // title/arrows sit at the true middle and never shift when the
+              // drop indicator appears/disappears between logs.
+              const SizedBox(width: _kDropSlotW),
               // Centered "‹ Log N • 1.8 s ›" — arrows step to the adjacent log
               // (grey at the ends); tap the title to rename.
               Expanded(
@@ -809,8 +827,8 @@ mixin _BleScreenUi on _BleScreenCore {
                       iconSize: 24,
                       visualDensity: VisualDensity.compact,
                       color: arrowInk,
-                      tooltip: "Newer log",
-                      onPressed: hasNewer ? () => _gotoAdjacentLog(-1) : null,
+                      tooltip: "Older log",
+                      onPressed: hasOlder ? () => _gotoAdjacentLog(1) : null,
                       icon: const Icon(Icons.chevron_left),
                     ),
                     Flexible(
@@ -829,14 +847,14 @@ mixin _BleScreenUi on _BleScreenCore {
                       iconSize: 24,
                       visualDensity: VisualDensity.compact,
                       color: arrowInk,
-                      tooltip: "Older log",
-                      onPressed: hasOlder ? () => _gotoAdjacentLog(1) : null,
+                      tooltip: "Newer log",
+                      onPressed: hasNewer ? () => _gotoAdjacentLog(-1) : null,
                       icon: const Icon(Icons.chevron_right),
                     ),
                   ],
                 ),
               ),
-              if (log.droppedSamples > 0) _dropBadge(log.droppedSamples),
+              _dropIndicator(log),
               _logActionsMenu(log),
             ],
           ),
@@ -1479,7 +1497,14 @@ mixin _BleScreenUi on _BleScreenCore {
     );
   }
 
-  void _toggleInfoBubble(BuildContext iconCtx, String info) {
+  // Show a non-modal speech bubble next to an icon. Default opens to the RIGHT
+  // (arrow points left at the icon); toLeft opens to the LEFT (arrow points
+  // right), used by the header's dropped-samples "!" so it doesn't run off-screen.
+  void _toggleInfoBubble(
+    BuildContext iconCtx,
+    String info, {
+    bool toLeft = false,
+  }) {
     // Re-tapping the icon that opened the bubble closes it.
     final bool sameOwner = identical(_infoBubbleOwner, iconCtx);
     _removeInfoBubble();
@@ -1489,9 +1514,11 @@ mixin _BleScreenUi on _BleScreenCore {
     final overlayState = Overlay.of(iconCtx);
     final overlayBox = overlayState.context.findRenderObject() as RenderBox?;
     if (box == null || overlayBox == null || !box.attached) return;
-    // Right-centre of the icon, in the overlay's coordinate space.
+    // Anchor on the icon edge the bubble grows from, in overlay coordinates.
     final Offset anchor = box.localToGlobal(
-      box.size.centerRight(Offset.zero),
+      toLeft
+          ? box.size.centerLeft(Offset.zero)
+          : box.size.centerRight(Offset.zero),
       ancestor: overlayBox,
     );
     final Size overlaySize = overlayBox.size;
@@ -1499,9 +1526,27 @@ mixin _BleScreenUi on _BleScreenCore {
     final Color bg = dark ? const Color(0xF21E1E1E) : const Color(0xF2FFFFFF);
     final Color border = dark ? Colors.white24 : Colors.black26;
     final Color ink = dark ? Colors.white : Colors.black87;
-    final double maxW = (overlaySize.width - anchor.dx - 24).clamp(
-      120.0,
-      280.0,
+    final double maxW =
+        (toLeft ? anchor.dx - 24 : overlaySize.width - anchor.dx - 24).clamp(
+          120.0,
+          280.0,
+        );
+
+    final Widget bubble = ConstrainedBox(
+      constraints: BoxConstraints(maxWidth: maxW),
+      child: Container(
+        padding: const EdgeInsets.fromLTRB(10, 7, 10, 7),
+        decoration: BoxDecoration(
+          color: bg,
+          borderRadius: BorderRadius.circular(6),
+          border: Border.all(color: border),
+        ),
+        child: Text(info, style: TextStyle(fontSize: 12, color: ink)),
+      ),
+    );
+    final Widget arrow = CustomPaint(
+      size: const Size(7, 13),
+      painter: _BubbleArrowPainter(bg, border, pointLeft: !toLeft),
     );
 
     _infoBubbleOwner = iconCtx;
@@ -1516,7 +1561,8 @@ mixin _BleScreenUi on _BleScreenCore {
             ),
           ),
           Positioned(
-            left: anchor.dx + 2,
+            left: toLeft ? null : anchor.dx + 2,
+            right: toLeft ? (overlaySize.width - anchor.dx + 2) : null,
             top: anchor.dy,
             child: FractionalTranslation(
               translation: const Offset(
@@ -1527,30 +1573,21 @@ mixin _BleScreenUi on _BleScreenCore {
                 color: Colors.transparent,
                 child: Row(
                   crossAxisAlignment: CrossAxisAlignment.center,
-                  children: [
-                    CustomPaint(
-                      size: const Size(7, 13),
-                      painter: _BubbleArrowPainter(bg, border),
-                    ),
-                    Transform.translate(
-                      offset: const Offset(-1, 0), // tuck under the arrow base
-                      child: ConstrainedBox(
-                        constraints: BoxConstraints(maxWidth: maxW),
-                        child: Container(
-                          padding: const EdgeInsets.fromLTRB(10, 7, 10, 7),
-                          decoration: BoxDecoration(
-                            color: bg,
-                            borderRadius: BorderRadius.circular(6),
-                            border: Border.all(color: border),
+                  children: toLeft
+                      ? [
+                          Transform.translate(
+                            offset: const Offset(1, 0), // tuck under the arrow
+                            child: bubble,
                           ),
-                          child: Text(
-                            info,
-                            style: TextStyle(fontSize: 12, color: ink),
+                          arrow,
+                        ]
+                      : [
+                          arrow,
+                          Transform.translate(
+                            offset: const Offset(-1, 0), // tuck under the arrow
+                            child: bubble,
                           ),
-                        ),
-                      ),
-                    ),
-                  ],
+                        ],
                 ),
               ),
             ),
@@ -2127,13 +2164,19 @@ mixin _BleScreenUi on _BleScreenCore {
 class _BubbleArrowPainter extends CustomPainter {
   final Color fill;
   final Color border;
-  _BubbleArrowPainter(this.fill, this.border);
+  final bool
+  pointLeft; // true = tip on the left (bubble to the right), else mirror
+  _BubbleArrowPainter(this.fill, this.border, {this.pointLeft = true});
 
   @override
   void paint(Canvas canvas, Size size) {
-    final tip = Offset(0, size.height / 2);
-    final top = Offset(size.width, 0);
-    final bot = Offset(size.width, size.height);
+    final tip = pointLeft
+        ? Offset(0, size.height / 2)
+        : Offset(size.width, size.height / 2);
+    final top = pointLeft ? Offset(size.width, 0) : const Offset(0, 0);
+    final bot = pointLeft
+        ? Offset(size.width, size.height)
+        : Offset(0, size.height);
     canvas.drawPath(
       Path()
         ..moveTo(top.dx, top.dy)
@@ -2158,5 +2201,5 @@ class _BubbleArrowPainter extends CustomPainter {
 
   @override
   bool shouldRepaint(covariant _BubbleArrowPainter old) =>
-      old.fill != fill || old.border != border;
+      old.fill != fill || old.border != border || old.pointLeft != pointLeft;
 }
