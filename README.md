@@ -61,13 +61,13 @@ flowchart TD
     FW["Firmware: batch samples<br/>12-byte header + up to 19×12-byte samples<br/>flush when full / every 15 ms"]
     IMU --> FW
   end
-  FW -->|"BLE notify — Nordic UART<br/>~1.66 kHz, batched, MTU 247"| PARSE
+  FW -->|"BLE notify — Nordic UART<br/>~1660 Hz, batched, MTU 247"| PARSE
   subgraph PHONE["Phone app — Flutter"]
     PARSE["Parse packets<br/>rebuild µs timeline from sample index<br/>· flag dropped samples"]
     LIVE["Live readouts<br/>orientation + paddle rotation"]
     HIT["Hit detection<br/>2-pole ~120 Hz high-pass + envelope"]
     CAP["Auto-capture<br/>ring buffer → one log per hit (±window)"]
-    ANALYZE["Per-log analysis<br/>• swing speed: ∫accel + high-pass detrend<br/>• paddle rotation: ω×r drift-free → ⟂/∥ split → brushing %<br/>• face angle vs vertical"]
+    ANALYZE["Per-log analysis<br/>• hand speed: ∫accel + high-pass detrend<br/>• paddle rotation: ω×r drift-free<br/>• overall = hand + rotation → ⟂/∥ split → brushing %<br/>• face angle vs vertical"]
     STORE["Store &amp; view<br/>interactive graphs · CSV / ZIP export"]
     CAL["Session calibration<br/>2 poses → face normal + lever direction"]
     PARSE --> LIVE
@@ -84,7 +84,7 @@ flowchart TD
 3. **Parse** — the phone rebuilds an absolute microsecond timeline from the per-sample index, so a lost packet shows up as a time gap and is flagged as dropped samples; raw counts are scaled to g and °/s.
 4. **Detect hits** — a 2-pole ~120 Hz high-pass plus an envelope follower isolates the ball's high-frequency impact "ring" from low-frequency swing motion and fires once per hit.
 5. **Capture** — in auto mode a ring buffer holds the last few seconds, so each hit is cut into its own log (a window before and after the impact).
-6. **Analyze each log** — replaying its samples yields overall paddle speed by integrating gravity-removed acceleration and high-pass-detrending the drift, split via the session calibration into perpendicular (closing) and parallel (brushing) parts to give the **brushing percentage**; hand speed and paddle rotation as the translational and rotational components of the overall speed; and the **forehand face angle** relative to vertical.
+6. **Analyze each log** — replaying its samples yields **hand speed** by integrating gravity-removed acceleration and high-pass-detrending the drift, and drift-free **paddle rotation** from ω×r; combined, these give the overall paddle speed, which the session calibration splits into perpendicular (closing) and parallel (brushing) parts to yield the **brushing percentage**; plus the **face angle** relative to the vertical.
 7. **Store & export** — logs are saved as binary files and shown as interactive graphs, exportable to CSV/ZIP.
 
 A quick two-pose calibration at the start of each session fixes the paddle's face normal and lever direction; these are **frozen into each log**, so metrics never shift if you recalibrate later.
