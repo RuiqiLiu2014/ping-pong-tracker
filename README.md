@@ -1,6 +1,6 @@
 # Ping Pong Tracker
 
-A ping pong paddle motion tracker, attached to the base of the handle, that sends 6-axis IMU data to a phone app at 1660 Hz via BLE. The phone app saves and displays the data in a readable format, analyzing hit time, paddle speed, brushing percentage, and more for every shot, allowing users to easily analyze their shot quality and find shortcomings in their swings.
+A ping pong paddle motion tracker, attached to the base of the handle, that sends 6-axis IMU data to a phone app at 1660 Hz via BLE. The phone app saves and displays the data in a readable format, showing hit time, paddle speed, brushing percentage, and more for every shot, allowing users to easily analyze their shot quality and find shortcomings in their swings.
 
 ---
 
@@ -24,9 +24,9 @@ There are sports trackers out there for racket sports, but they tend to be expen
 ## Features
 
 - Accelerometer and gyroscope streaming at 1660 Hz to accurately capture swing motions
-- Automatic hit detection to automatically detect and log data for each shot
+- Automatic hit detection to log data for each shot
 - Manual logging mode to log practice swings
-- Metrics for every log including overall paddle speed, hand speed, paddle rotation, brushing percentage, face angle, and hit timing using interactive graphs
+- Metrics for every log including overall paddle speed, hand speed, paddle rotation, brushing percentage, face angle, and hit timing—all displayed using interactive graphs
 - Rechargeable battery pack via USB-C port
 - Straightforward app interface, color themes, light and dark mode, and very flexible settings options
 
@@ -67,7 +67,7 @@ flowchart TD
     LIVE["Live readouts<br/>orientation + paddle rotation"]
     HIT["Hit detection<br/>2-pole ~120 Hz high-pass + envelope"]
     CAP["Auto-capture<br/>ring buffer → one log per hit (±window)"]
-    ANALYZE["Per-log analysis<br/>• swing speed: ∫accel + high-pass detrend<br/>• face speed: ω×r drift-free → ⟂/∥ split → brushing %<br/>• face angle vs vertical"]
+    ANALYZE["Per-log analysis<br/>• swing speed: ∫accel + high-pass detrend<br/>• paddle rotation: ω×r drift-free → ⟂/∥ split → brushing %<br/>• face angle vs vertical"]
     STORE["Store &amp; view<br/>interactive graphs · CSV / ZIP export"]
     CAL["Session calibration<br/>2 poses → face normal + lever direction"]
     PARSE --> LIVE
@@ -84,7 +84,7 @@ flowchart TD
 3. **Parse** — the phone rebuilds an absolute microsecond timeline from the per-sample index, so a lost packet shows up as a time gap and is flagged as dropped samples; raw counts are scaled to g and °/s.
 4. **Detect hits** — a 2-pole ~120 Hz high-pass plus an envelope follower isolates the ball's high-frequency impact "ring" from low-frequency swing motion and fires once per hit.
 5. **Capture** — in auto mode a ring buffer holds the last few seconds, so each hit is cut into its own log (a window before and after the impact).
-6. **Analyze each log** — replaying its samples yields swing (hand) speed by integrating gravity-removed acceleration and high-pass-detrending the drift; drift-free **face speed** from ω×r, split via the session calibration into perpendicular (closing) and parallel (brushing) parts to give the **brushing percentage**; and the **face angle** relative to vertical.
+6. **Analyze each log** — replaying its samples yields overall paddle speed by integrating gravity-removed acceleration and high-pass-detrending the drift, split via the session calibration into perpendicular (closing) and parallel (brushing) parts to give the **brushing percentage**; hand speed and paddle rotation as the translational and rotational components of the overall speed; and the **forehand face angle** relative to vertical.
 7. **Store & export** — logs are saved as binary files and shown as interactive graphs, exportable to CSV/ZIP.
 
 A quick two-pose calibration at the start of each session fixes the paddle's face normal and lever direction; these are **frozen into each log**, so metrics never shift if you recalibrate later.
@@ -93,7 +93,7 @@ A quick two-pose calibration at the start of each session fixes the paddle's fac
 
 ## Technical highlights
 
-- The 6-axis IMU streams at its maximum (hardware constrained) frequency of 1.66 kHz via BLE to the phone app, packaged with timestamps. App notifies the user of any dropped data packets.
+- The 6-axis IMU streams at its maximum (hardware constrained) frequency of 1660 Hz via BLE to the phone app, packaged with timestamps. App notifies the user of any dropped data packets.
 - Speed is calculated by integrating accelerometer data and combining with gyroscope data. Accelerometer data contains natural drift when integrated, which is fixed by a centered moving average high-pass.
 - The app has a calibration feature that is done at the start of each session, which calibrates by measuring gravitational acceleration in two paddle positions and allows for data such as face angle.
 - The app uses a 2-pole high pass filter to determine when the ball was hit by detecting high-frequency paddle vibrations and records these in each log, enabling the automatic logging feature that records one log per hit. This also enables the ability to analyze swing quality by looking at points of maximum speed and spin generation compared to hit timing.
@@ -113,7 +113,7 @@ A quick two-pose calibration at the start of each session fixes the paddle's fac
 | 100 mAh LiPo Battery Pack | rechargeable battery pack to power the microcontroller | https://www.amazon.com/dp/B083NWXLTK |
 | 1P2T Mini Slide Switch | switch to turn the unit on and off | https://www.amazon.com/dp/B01N25FBWD |
 
-**3D-printed mount (optional):** STL files for the case and lid are in [`stls/`](stls/) (`case.stl`, `lid.stl`). The printed mount is optional — it houses the board and battery and attaches to the base of the handle, but you can also secure the electronics with electrical tape.
+**3D printed mount (optional):** STL files for the case and lid are in [`stls/`](stls/) (`case.stl`, `lid.stl`). The printed mount is optional — it houses the board and battery and attaches to the base of the handle, but you can also secure the electronics with electrical tape.
 
 ---
 
@@ -136,7 +136,7 @@ Watch the video below for assembly instructions, then move on to **Getting start
    2. **iOS** — build from source on a Mac with Xcode: clone this repo, then run `cd app && flutter build ipa`, or open `ios/Runner.xcworkspace`, select your signing team, and run it to your iPhone (requires Xcode + your Apple ID for signing).
 3. **Power on** — mount the board at the base of the paddle handle and flip the switch on; the LED blinks blue while it looks for the app.
 4. **Connect & calibrate** — open the app, tap **Connect to Paddle**, then **Calibrate** and follow the two-pose wizard.
-5. **Play** — start swinging. Each hit is auto-detected and logged; open a log to see speed, spin, and orientation. Adjust settings and themes as desired. Read the user guide below for details.
+5. **Play** — start swinging. Each hit is auto-detected and logged; open a log to see speed, brushing percentage, and face angle. Adjust settings and themes as desired. Read the user guide below for details.
 
 ---
 
