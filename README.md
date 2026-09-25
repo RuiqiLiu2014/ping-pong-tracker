@@ -1,12 +1,17 @@
 # Ping Pong Tracker
 
-> A ping pong paddle motion tracker, attached to the base of the handle, that sends 6-axis IMU data to a phone app at 1660 Hz via BLE. The phone app saves and displays the data in a readable format, analyzing hit time, paddle speed, spin ratio, and more for every shot, allowing users to easily analyze their shot quality and find shortcomings in their swings.
+A ping pong paddle motion tracker, attached to the base of the handle, that sends 6-axis IMU data to a phone app at 1660 Hz via BLE. The phone app saves and displays the data in a readable format, analyzing hit time, paddle speed, brushing percentage, and more for every shot, allowing users to easily analyze their shot quality and find shortcomings in their swings.
 
 ---
 
 ## Demo
 
-[ YouTube link goes here ]
+Watch the video below for a short demo.
+<p align="center">
+  <a href="https://youtu.be/olZcyWfupK0">
+    <img src="docs/img/demo_thumbnail.png" width="640" alt="Ping Pong Tracker Demo — click to watch">
+  </a>
+</p>
 
 ---
 
@@ -19,9 +24,9 @@ There are sports trackers out there for racket sports, but they tend to be expen
 ## Features
 
 - Accelerometer and gyroscope streaming at 1660 Hz to accurately capture swing motions
-- Automatic hit detection to automatically log data before and after each hit
+- Automatic hit detection to automatically detect and log data for each shot
 - Manual logging mode to log practice swings
-- Metrics for every log including swing speed, spin ratio, paddle orientation, and hit timing
+- Metrics for every log including overall paddle speed, hand speed, paddle rotation, brushing percentage, face angle, and hit timing using interactive graphs
 - Rechargeable battery pack via USB-C port
 - Straightforward app interface, color themes, light and dark mode, and very flexible settings options
 
@@ -59,10 +64,10 @@ flowchart TD
   FW -->|"BLE notify — Nordic UART<br/>~1.66 kHz, batched, MTU 247"| PARSE
   subgraph PHONE["Phone app — Flutter"]
     PARSE["Parse packets<br/>rebuild µs timeline from sample index<br/>· flag dropped samples"]
-    LIVE["Live readouts<br/>orientation + face rotation"]
+    LIVE["Live readouts<br/>orientation + paddle rotation"]
     HIT["Hit detection<br/>2-pole ~120 Hz high-pass + envelope"]
     CAP["Auto-capture<br/>ring buffer → one log per hit (±window)"]
-    ANALYZE["Per-log analysis<br/>• swing speed: ∫accel + high-pass detrend<br/>• face speed: ω×r drift-free → ⟂/∥ split → spin ratio<br/>• face angle vs vertical"]
+    ANALYZE["Per-log analysis<br/>• swing speed: ∫accel + high-pass detrend<br/>• face speed: ω×r drift-free → ⟂/∥ split → brushing %<br/>• face angle vs vertical"]
     STORE["Store &amp; view<br/>interactive graphs · CSV / ZIP export"]
     CAL["Session calibration<br/>2 poses → face normal + lever direction"]
     PARSE --> LIVE
@@ -75,38 +80,22 @@ flowchart TD
 **End to end:**
 
 1. **Sample** — the XIAO's LSM6DS3 reads accelerometer + gyroscope at 1660 Hz.
-2. **Batch & stream** — the firmware packs samples into BLE notifications over the
-   Nordic UART service: a 12-byte header (sample index, timestamp, battery, count,
-   cell mV) plus up to 19 samples (6× int16 each), flushed when the buffer fills or
-   every 15 ms, sized to the negotiated MTU and ~7.5–15 ms connection interval.
-3. **Parse** — the phone rebuilds an absolute microsecond timeline from the
-   per-sample index, so a lost packet shows up as a time gap and is flagged as
-   dropped samples; raw counts are scaled to g and °/s.
-4. **Detect hits** — a 2-pole ~120 Hz high-pass plus an envelope follower isolates
-   the ball's high-frequency impact "ring" from low-frequency swing motion and
-   fires once per hit.
-5. **Capture** — in auto mode a ring buffer holds the last few seconds, so each hit
-   is cut into its own log (a window before and after the impact).
-6. **Analyze each log** — replaying its samples yields swing (hand) speed by
-   integrating gravity-removed acceleration and high-pass-detrending the drift;
-   drift-free **face speed** from ω×r, split via the session calibration into
-   perpendicular (closing) and parallel (brushing) parts to give the **spin ratio**;
-   and the **face angle** relative to vertical.
-7. **Store & export** — logs are saved as binary files and shown as interactive
-   graphs, exportable to CSV/ZIP.
+2. **Batch & stream** — the firmware packs samples into BLE notifications over the Nordic UART service: a 12-byte header (sample index, timestamp, battery, count, cell mV) plus up to 19 samples (6× int16 each), flushed when the buffer fills or every 15 ms, sized to the negotiated MTU and ~7.5–15 ms connection interval.
+3. **Parse** — the phone rebuilds an absolute microsecond timeline from the per-sample index, so a lost packet shows up as a time gap and is flagged as dropped samples; raw counts are scaled to g and °/s.
+4. **Detect hits** — a 2-pole ~120 Hz high-pass plus an envelope follower isolates the ball's high-frequency impact "ring" from low-frequency swing motion and fires once per hit.
+5. **Capture** — in auto mode a ring buffer holds the last few seconds, so each hit is cut into its own log (a window before and after the impact).
+6. **Analyze each log** — replaying its samples yields swing (hand) speed by integrating gravity-removed acceleration and high-pass-detrending the drift; drift-free **face speed** from ω×r, split via the session calibration into perpendicular (closing) and parallel (brushing) parts to give the **brushing percentage**; and the **face angle** relative to vertical.
+7. **Store & export** — logs are saved as binary files and shown as interactive graphs, exportable to CSV/ZIP.
 
-A quick two-pose calibration at the start of each session fixes the paddle's face
-normal and lever direction; these are **frozen into each log**, so metrics never
-shift if you recalibrate later.
+A quick two-pose calibration at the start of each session fixes the paddle's face normal and lever direction; these are **frozen into each log**, so metrics never shift if you recalibrate later.
 
 ---
 
 ## Technical highlights
 
-<!-- The hard parts. This is what depth-checking engineers scan for. -->
 - The 6-axis IMU streams at its maximum (hardware constrained) frequency of 1.66 kHz via BLE to the phone app, packaged with timestamps. App notifies the user of any dropped data packets.
 - Speed is calculated by integrating accelerometer data and combining with gyroscope data. Accelerometer data contains natural drift when integrated, which is fixed by a centered moving average high-pass.
-- The app has a calibration feature that is done at the start of each session, which calibrates by measuring gravitational acceleration in two paddle positions and allows for data such as paddle angle.
+- The app has a calibration feature that is done at the start of each session, which calibrates by measuring gravitational acceleration in two paddle positions and allows for data such as face angle.
 - The app uses a 2-pole high pass filter to determine when the ball was hit by detecting high-frequency paddle vibrations and records these in each log, enabling the automatic logging feature that records one log per hit. This also enables the ability to analyze swing quality by looking at points of maximum speed and spin generation compared to hit timing.
 
 ---
@@ -129,7 +118,8 @@ shift if you recalibrate later.
 ---
 
 ## Assembly
-Watch the video below for assembly instructions, then move on to **Getting Started**.
+
+Watch the video below for assembly instructions, then move on to **Getting started**.
 <p align="center">
   <a href="https://youtu.be/WwMqLt4rDPo">
     <img src="docs/img/assembly_thumbnail.png" width="640" alt="Ping Pong Tracker Assembly Instructions — click to watch">
@@ -172,7 +162,7 @@ Watch the video below for assembly instructions, then move on to **Getting Start
 - **Calibrate** at the start of each session (two quick poses) for accurate speed and angle.
 - **Auto-capture** (default): every detected hit becomes its own log. Switch to manual logging mode if needed.
 - **Manual logging**: for practice swings with no ball — start/stop recording yourself (toggle in Settings).
-- Open a log to see swing speed, spin ratio, face angle, and hit timing; export as CSV from the log menu.
+- Open a log to see swing speed, brushing percentage, face angle, and hit timing; export as CSV from the log menu.
 
 ---
 
